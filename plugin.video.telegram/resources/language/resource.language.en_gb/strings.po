@@ -1,0 +1,86 @@
+# Kodi Media Center language file
+# Addon id: plugin.video.telegram
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en_GB\n"
+
+msgctxt "#30000"
+msgid "Account"
+msgstr ""
+
+msgctxt "#30001"
+msgid "API ID"
+msgstr ""
+
+msgctxt "#30002"
+msgid "Create these at https://my.telegram.org -> API development tools"
+msgstr ""
+
+msgctxt "#30003"
+msgid "API hash"
+msgstr ""
+
+msgctxt "#30010"
+msgid "Telegram API credentials"
+msgstr ""
+
+msgctxt "#30020"
+msgid "Content"
+msgstr ""
+
+msgctxt "#30021"
+msgid "Chats to include"
+msgstr ""
+
+msgctxt "#30022"
+msgid "Channels"
+msgstr ""
+
+msgctxt "#30023"
+msgid "Groups"
+msgstr ""
+
+msgctxt "#30024"
+msgid "Private chats (DMs)"
+msgstr ""
+
+msgctxt "#30025"
+msgid "Listing"
+msgstr ""
+
+msgctxt "#30026"
+msgid "Items per page"
+msgstr ""
+
+msgctxt "#30027"
+msgid "Refresh cached listings after (minutes)"
+msgstr ""
+
+msgctxt "#30028"
+msgid "How long chat lists and media lists are kept in memory before being fetched again"
+msgstr ""
+
+msgctxt "#30040"
+msgid "Advanced"
+msgstr ""
+
+msgctxt "#30041"
+msgid "Local server port"
+msgstr ""
+
+msgctxt "#30042"
+msgid "Port of the local streaming server (127.0.0.1 only). Restart Kodi after changing."
+msgstr ""
+
+msgctxt "#30043"
+msgid "Parallel download requests per video"
+msgstr ""
+
+msgctxt "#30044"
+msgid "Higher can stream faster; 1-8"
+msgstr ""
+
+msgctxt "#30045"
+msgid "Image/thumbnail disk cache limit (MB)"
+msgstr ""

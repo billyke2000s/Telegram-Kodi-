@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<settings version="1">
+    <section id="plugin.video.telegram">
+        <category id="account" label="30000" help="">
+            <group id="1" label="30010">
+                <setting id="api_id" type="string" label="30001" help="30002">
+                    <level>0</level>
+                    <default/>
+                    <constraints><allowempty>true</allowempty></constraints>
+                    <control type="edit" format="string"><heading>30001</heading></control>
+                </setting>
+                <setting id="api_hash" type="string" label="30003" help="30002">
+                    <level>0</level>
+                    <default/>
+                    <constraints><allowempty>true</allowempty></constraints>
+                    <control type="edit" format="string"><heading>30003</heading></control>
+                </setting>
+            </group>
+        </category>
+        <category id="content" label="30020" help="">
+            <group id="1" label="30021">
+                <setting id="include_channels" type="boolean" label="30022" help="">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="include_groups" type="boolean" label="30023" help="">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="include_private" type="boolean" label="30024" help="">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+            </group>
+            <group id="2" label="30025">
+                <setting id="page_size" type="integer" label="30026" help="">
+                    <level>0</level>
+                    <default>50</default>
+                    <control type="edit" format="integer"><heading>30026</heading></control>
+                </setting>
+                <setting id="cache_minutes" type="integer" label="30027" help="30028">
+                    <level>0</level>
+                    <default>10</default>
+                    <control type="edit" format="integer"><heading>30027</heading></control>
+                </setting>
+            </group>
+        </category>
+        <category id="advanced" label="30040" help="">
+            <group id="1" label="30040">
+                <setting id="port" type="integer" label="30041" help="30042">
+                    <level>0</level>
+                    <default>8765</default>
+                    <control type="edit" format="integer"><heading>30041</heading></control>
+                </setting>
+                <setting id="parallel" type="integer" label="30043" help="30044">
+                    <level>0</level>
+                    <default>4</default>
+                    <control type="edit" format="integer"><heading>30043</heading></control>
+                </setting>
+                <setting id="cache_mb" type="integer" label="30045" help="">
+                    <level>0</level>
+                    <default>500</default>
+                    <control type="edit" format="integer"><heading>30045</heading></control>
+                </setting>
+            </group>
+        </category>
+    </section>
+</settings>
