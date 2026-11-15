@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="repository.telegramkodi" name="Telegram Kodi Repository" version="1.0.0" provider-name="Billy">
+    <extension point="xbmc.addon.repository" name="Telegram Kodi Repository">
+        <dir>
+            <info compressed="false">https://billyke2000s.github.io/Telegram-Kodi-/addons.xml</info>
+            <checksum>https://billyke2000s.github.io/Telegram-Kodi-/addons.xml.md5</checksum>
+            <datadir zip="true">https://billyke2000s.github.io/Telegram-Kodi-/</datadir>
+        </dir>
+    </extension>
+    <extension point="xbmc.addon.metadata">
+        <summary lang="en_GB">Installs and updates the Telegram Media add-on</summary>
+        <description lang="en_GB">Repository for the Telegram Media Kodi add-on.</description>
+        <platform>all</platform>
+        <assets>
+            <icon>icon.png</icon>
+        </assets>
+    </extension>
+</addon>
