@@ -232,8 +232,11 @@ def media(chats_param, kind, cursor, title, unread=False):
         q["cursor"] = cursor
     res = api("media?" + urlencode(q))
     combined = chats_param == "all"
+    # Same page re-listed as pictures, so a tapped photo can open a slideshow (left/right)
+    listing = {"chats": chats_param, "kind": kind, "cursor": cursor or "", "title": title,
+               "unread": 1 if unread else 0}
     for it in res["items"]:
-        add_media_item(it, combined)
+        add_media_item(it, combined, listing)
     if not res["items"] and not cursor:
         add_dir("[I]Nothing here%s[/I]" % (" - no unread photos/videos" if unread else ""),
                 url_for(mode="refresh"), folder=False)
@@ -243,7 +246,7 @@ def media(chats_param, kind, cursor, title, unread=False):
     end("images" if CT == "image" else "videos")
 
 
-def add_media_item(it, combined):
+def add_media_item(it, combined, listing=None):
     cid, mid = it["chat_id"], it["msg_id"]
     text = (it.get("text") or "").strip()
     first = text.splitlines()[0][:90] if text else ""
@@ -270,7 +273,10 @@ def add_media_item(it, combined):
         else:
             set_plot(li, text)
             li.setProperty("IsPlayable", "false")
-            path = url_for(mode="show_image", url=full)
+            if listing:
+                path = url_for(mode="slideshow", start=full, **listing)
+            else:
+                path = url_for(mode="show_image", url=full)
         xbmcplugin.addDirectoryItem(HANDLE, path, li, isFolder=False)
         return
 
@@ -452,6 +458,15 @@ def login():
     xbmc.executebuiltin("Container.Refresh")
 
 
+def slideshow(p):
+    """Open Kodi's picture slideshow over the current page, starting at the tapped
+    photo, so left/right moves between photos. Videos on the page are skipped or
+    played by the slideshow depending on Kodi's picture settings."""
+    listing = url_for(mode="media", ct="image", chats=p.get("chats", "all"), kind=p.get("kind", "all"),
+                      cursor=p.get("cursor", ""), title=p.get("title", ""), unread=p.get("unread", "0"))
+    xbmc.executebuiltin('SlideShow("%s",beginslide="%s")' % (listing, p["start"]))
+
+
 def logout():
     if not xbmcgui.Dialog().yesno("Telegram", "Log out and delete the saved session on this device?"):
         return
@@ -487,6 +502,8 @@ def router():
                   PARAMS.get("title", ""), PARAMS.get("unread") == "1")
         elif mode == "show_image":
             xbmc.executebuiltin("ShowPicture(%s)" % PARAMS["url"])
+        elif mode == "slideshow":
+            slideshow(PARAMS)
         elif mode == "login":
             login()
         elif mode == "login_qr":

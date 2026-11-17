@@ -11,6 +11,7 @@ from tgkodi import common  # noqa: E402
 common.setup_native_crypto()  # must happen before telethon is imported
 
 from tgkodi.server import Engine, KodiLogHandler  # noqa: E402
+from tgkodi import fastcrypto  # noqa: E402
 
 
 def read_config():
@@ -43,6 +44,11 @@ def main():
     tl = logging.getLogger("telethon")
     tl.addHandler(handler)
     tl.setLevel(logging.INFO)
+
+    try:  # fast OpenSSL AES on boxes without the bundled cryptg (Android/ARM/Linux)
+        fastcrypto.install(common.log)
+    except Exception as e:
+        common.log("fastcrypto failed: %r" % e, xbmc.LOGWARNING)
 
     engine = Engine(common.profile_dir(), common.get_token(create=True), common.log)
     try:
