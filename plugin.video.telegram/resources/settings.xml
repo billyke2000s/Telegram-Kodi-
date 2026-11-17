@@ -51,6 +51,20 @@
                     <default>true</default>
                     <control type="toggle"/>
                 </setting>
+                <setting id="slideshow_seconds" type="integer" label="30031" help="">
+                    <level>0</level>
+                    <default>5</default>
+                    <control type="edit" format="integer"><heading>30031</heading></control>
+                </setting>
+                <setting id="download_folder" type="path" label="30032" help="30033">
+                    <level>0</level>
+                    <default/>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                        <writable>true</writable>
+                    </constraints>
+                    <control type="button" format="path"><heading>30032</heading></control>
+                </setting>
             </group>
         </category>
         <category id="advanced" label="30040" help="">

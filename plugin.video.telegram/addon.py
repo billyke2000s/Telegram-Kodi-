@@ -143,6 +143,11 @@ def root():
     for kind, label in (("all", "Mixed"), ("photo", "Images"), ("video", "Videos")):
         add_dir("[B]All %s[/B]" % label, url_for(mode="media", chats="all", kind=kind, title="All " + label),
                 plot="%s from every included chat, newest first." % label, context=refresh_ctx())
+    add_dir("[B]Search[/B]", url_for(mode="search_prompt", chats="all", title="All chats"), folder=False,
+            plot="Find photos and videos by caption or file name across all your chats.")
+    saved = [d for d in dialogs if d["title"] == "Saved Messages" and d["type"] == "user"]
+    if saved:
+        add_chat(saved[0])
 
     inc = {"channel": common.setting_bool("include_channels"),
            "group": common.setting_bool("include_groups"),
@@ -166,6 +171,8 @@ def root():
     add_dir("[I]Account: %s  |  crypto: %s[/I]" % (st.get("user", "?"), st.get("crypto", "?")),
             url_for(mode="status"), folder=False)
     add_dir("[I]Settings[/I]", url_for(mode="settings"), folder=False)
+    add_dir("[I]Clear cache[/I]", url_for(mode="clear_cache"), folder=False,
+            plot="Delete downloaded thumbnails/photos and forget cached lists.")
     add_dir("[I]Log out[/I]", url_for(mode="logout"), folder=False)
     end()
 
@@ -175,8 +182,11 @@ def add_chat(d):
     label = d["title"]
     if d.get("unread"):
         label += "  [COLOR grey](%d unread)[/COLOR]" % d["unread"]
+    ctx = [("Search in this chat", "RunPlugin(%s)" % url_for(mode="search_prompt", chats=d["id"], title=d["title"]))]
+    if d.get("unread"):
+        ctx.append(("Mark as read", "RunPlugin(%s)" % url_for(mode="read", chat=d["id"])))
     add_dir(label, url_for(mode="chat", id=d["id"], title=d["title"], unread=d.get("unread") or 0),
-            thumb=thumb, context=refresh_ctx())
+            thumb=thumb, context=ctx + refresh_ctx())
 
 
 def chats(typ):
@@ -214,6 +224,9 @@ def chat(cid, title, unread=0):
     for kind, label in (("all", "Mixed"), ("photo", "Images"), ("video", "Videos")):
         add_dir(label, url_for(mode="media", chats=str(cid), kind=kind, title="%s - %s" % (title, label)),
                 context=refresh_ctx())
+    add_dir("Search in this chat", url_for(mode="search_prompt", chats=cid, title=title), folder=False)
+    if unread:
+        add_dir("Mark as read", url_for(mode="read", chat=cid), folder=False)
     end()
 
 
@@ -225,31 +238,70 @@ def fmt_dur(sec):
     return "%d:%02d:%02d" % (h, m, s) if h else "%d:%02d" % (m, s)
 
 
-def media(chats_param, kind, cursor, title, unread=False):
-    q = {"chats": chats_param, "kind": kind, "n": common.setting_int("page_size", 50, 10, 200)}
-    if unread:
+def page_query(p):
+    """API path for one page of a listing described by params p (media or search)."""
+    q = {"chats": p.get("chats", "all"), "kind": p.get("kind", "all"),
+         "n": common.setting_int("page_size", 50, 10, 200)}
+    if p.get("cursor"):
+        q["cursor"] = p["cursor"]
+    if p.get("src") == "search":
+        q["q"] = p.get("q", "")
+        return "search?" + urlencode(q)
+    if str(p.get("unread")) == "1":
         q["unread"] = "1"
-    if cursor:
-        q["cursor"] = cursor
-    res = api("media?" + urlencode(q))
-    combined = chats_param == "all"
-    # Same page re-listed as pictures, so a tapped photo can open a slideshow (left/right)
+    return "media?" + urlencode(q)
+
+
+def fetch_page(p):
+    return api(page_query(p))
+
+
+def media(chats_param, kind, cursor, title, unread=False, src="media", query=""):
     listing = {"chats": chats_param, "kind": kind, "cursor": cursor or "", "title": title,
-               "unread": 1 if unread else 0}  # page number isn't needed by the viewer
-    for it in res["items"]:
-        add_media_item(it, combined, listing)
-    if not res["items"] and not cursor:
-        add_dir("[I]Nothing here%s[/I]" % (" - no unread photos/videos" if unread else ""),
-                url_for(mode="refresh"), folder=False)
+               "unread": 1 if unread else 0, "src": src, "q": query}
+    res = fetch_page(listing)
+    combined = chats_param == "all"
+    items = res["items"]
+    if any(it["kind"] == "video" for it in items) and CT != "image":
+        add_dir("[B]Play all videos[/B]", url_for(mode="playall", **listing), folder=False, thumb=ICON,
+                plot="Plays every video on this page in order. Use Next/Previous on the remote to skip.")
+    for it in items:
+        add_media_item(it, combined or src == "search", listing)
+    if not items and not cursor:
+        msg = " - no unread photos/videos" if unread else (" for '%s'" % query if src == "search" else "")
+        add_dir("[I]Nothing here%s[/I]" % msg, url_for(mode="refresh"), folder=False)
     page = int(PARAMS.get("page", "1") or 1)
     if res.get("next"):
+        nxt = dict(listing, cursor=res["next"])
         add_dir("[B]Next page (%d) >>[/B]" % (page + 1),
-                url_for(mode="media", chats=chats_param, kind=kind, cursor=res["next"], title=title,
-                        unread=1 if unread else 0, page=page + 1),
-                thumb=ICON, plot="Older items")
+                url_for(mode="media", page=page + 1, **nxt), thumb=ICON, plot="Older items")
     end("images" if CT == "image" else "videos")
     if common.setting_bool("wall_view", True):
         xbmc.executebuiltin("Container.SetViewMode(500)")  # Estuary "Wall"; ignored if absent
+
+
+def fmt_size(n):
+    if not n:
+        return ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" if unit in ("B", "KB") else "%.1f %s") % (n, unit)
+        n /= 1024.0
+
+
+def item_ctx(it, listing):
+    cid, mid = it["chat_id"], it["msg_id"]
+    start = "%d_%d" % (cid, mid)
+    ctx = []
+    if it["kind"] == "video":
+        ctx.append(("Play all videos from here", "RunPlugin(%s)" % url_for(mode="playall", start=start, **listing)))
+    ctx.append(("Open in full-screen viewer", "RunPlugin(%s)" % url_for(mode="viewer", start=start, **listing)))
+    if listing.get("chats") == "all" or listing.get("src") == "search":
+        ctx.append(("Go to chat: %s" % (it.get("chat_title") or "chat"),
+                    "Container.Update(%s)" % url_for(mode="chat", id=cid, title=it.get("chat_title") or "")))
+    ctx.append(("Save to device", "RunPlugin(%s)" % url_for(mode="save", chat=cid, msg=mid)))
+    ctx.append(("Mark chat as read", "RunPlugin(%s)" % url_for(mode="read", chat=cid)))
+    return ctx + refresh_ctx()
 
 
 def add_media_item(it, combined, listing=None):
@@ -263,7 +315,15 @@ def add_media_item(it, combined, listing=None):
     if combined and it.get("chat_title"):
         label = "[COLOR grey]%s:[/COLOR] %s" % (it["chat_title"], label)
     thumb = media_url("thumb", cid, mid)
+    if it["kind"] == "video":
+        res_p = min(it.get("w") or 0, it.get("h") or 0)
+        extra = [x for x in (fmt_dur(it.get("duration")), ("%dp" % res_p) if res_p else "",
+                             fmt_size(it.get("size"))) if x]
+        if extra:
+            label = label.split("  [COLOR grey](")[0] + "  [COLOR grey](%s)[/COLOR]" % " | ".join(extra)
     li = xbmcgui.ListItem(label, when)
+    if listing:
+        li.addContextMenuItems(item_ctx(it, listing))
     try:
         li.setDateTime(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(it["date"])))
     except Exception:
@@ -297,6 +357,9 @@ def add_media_item(it, combined, listing=None):
         if it.get("duration"):
             tag.setDuration(int(it["duration"]))
         tag.setMediaType("video")
+        if it.get("w") and it.get("h"):  # lets the skin show resolution badges
+            tag.addVideoStream(xbmc.VideoStreamDetail(width=it["w"], height=it["h"],
+                                                      duration=int(it.get("duration") or 0)))
     except AttributeError:
         li.setInfo("video", {"title": first or it.get("name") or "Video " + when, "plot": text, "duration": it.get("duration") or 0})
     xbmcplugin.addDirectoryItem(HANDLE, path, li, isFolder=False)
@@ -470,6 +533,8 @@ class PhotoViewer(xbmcgui.WindowDialog):
     SlideShow() sorts by label and can't page, so we drive navigation ourselves."""
     LEFT, RIGHT, UP, DOWN, SELECT = 1, 2, 3, 4, 7
     NEXT_ITEM, PREV_ITEM, MOUSE_CLICK = 14, 15, 100
+    PLAY_PAUSE = (12, 79, 229)        # pause, play, play/pause
+    INFO, MENU = 11, (117, 9001)      # info key, context-menu key / long press
     BACK = (9, 10, 92, 13)
     CENTER = 0x00000002
 
@@ -477,6 +542,10 @@ class PhotoViewer(xbmcgui.WindowDialog):
         xbmcgui.WindowDialog.__init__(self)
         self.items, self.index, self.next_cursor, self.query = items, index, next_cursor, query
         self.play_item = None
+        self.goto_chat = None
+        self.auto = False
+        self.closed = False
+        self.bar_visible = True
         backdrop = _backdrop()
         self.addControl(xbmcgui.ControlImage(0, 0, 1280, 720, backdrop))
         # sits behind the picture, so it's only visible until the picture has loaded
@@ -484,7 +553,8 @@ class PhotoViewer(xbmcgui.WindowDialog):
                                              textColor="0xFF888888", alignment=self.CENTER))
         self.image = xbmcgui.ControlImage(0, 0, 1280, 720, "", aspectRatio=2)
         self.addControl(self.image)
-        self.addControl(xbmcgui.ControlImage(0, 672, 1280, 48, backdrop, colorDiffuse="B0000000"))
+        self.bar = xbmcgui.ControlImage(0, 672, 1280, 48, backdrop, colorDiffuse="B0000000")
+        self.addControl(self.bar)
         self.info = xbmcgui.ControlLabel(20, 680, 1240, 32, "", font="font12",
                                          textColor="0xFFFFFFFF", alignment=self.CENTER)
         self.addControl(self.info)
@@ -507,6 +577,8 @@ class PhotoViewer(xbmcgui.WindowDialog):
             url = media_url("photo", cid, mid)
         if text:
             parts.append(text[0][:80])
+        if self.auto:
+            parts.insert(0, "[B]SLIDESHOW[/B] (Play/Pause to stop)")
         self.image.setImage(url, False)
         self.info.setLabel("   |   ".join(parts))
         self.prefetch()
@@ -534,7 +606,7 @@ class PhotoViewer(xbmcgui.WindowDialog):
             self.info.setLabel("Loading more...")
             q = dict(self.query, cursor=self.next_cursor)
             try:
-                res = api("media?" + urlencode(q))
+                res = fetch_page(q)
                 self.items.extend(res["items"])
                 self.next_cursor = res.get("next")
             except (ApiError, ServiceDown) as e:
@@ -544,8 +616,72 @@ class PhotoViewer(xbmcgui.WindowDialog):
             self.index = j
         self.show_current()
 
+    def toggle_slideshow(self):
+        self.auto = not self.auto
+        self.show_current()
+        if self.auto:
+            threading.Thread(target=self._slideshow_loop, daemon=True).start()
+
+    def _slideshow_loop(self):
+        delay = common.setting_int("slideshow_seconds", 5, 2, 60)
+        monitor = xbmc.Monitor()
+        while self.auto and not self.closed:
+            if monitor.waitForAbort(delay) or not self.auto or self.closed:
+                break
+            before = self.index
+            self.move(1)
+            if self.index == before:  # reached the end
+                self.auto = False
+                self.show_current()
+
+    def toggle_bar(self):
+        self.bar_visible = not self.bar_visible
+        self.bar.setVisible(self.bar_visible)
+        self.info.setVisible(self.bar_visible)
+
+    def options(self):
+        it = self.items[self.index]
+        labels = ["Stop slideshow" if self.auto else "Start slideshow",
+                  "Hide caption bar" if self.bar_visible else "Show caption bar",
+                  "Save to device", "Go to chat: %s" % (it.get("chat_title") or "chat"),
+                  "Mark chat as read"]
+        if it["kind"] == "video":
+            labels.insert(0, "Play video")
+        choice = xbmcgui.Dialog().contextmenu(labels)
+        if choice < 0:
+            return
+        pick = labels[choice]
+        if pick == "Play video":
+            self.play_item = it
+            self.close()
+        elif pick.endswith("slideshow"):
+            self.toggle_slideshow()
+        elif pick.endswith("caption bar"):
+            self.toggle_bar()
+        elif pick == "Save to device":
+            save_item(it["chat_id"], it["msg_id"])
+        elif pick.startswith("Go to chat"):
+            self.goto_chat = it
+            self.close()
+        elif pick == "Mark chat as read":
+            mark_read(it["chat_id"])
+
+    def close(self):
+        self.closed = True
+        self.auto = False
+        xbmcgui.WindowDialog.close(self)
+
     def onAction(self, action):
         a = action.getId()
+        if a in self.PLAY_PAUSE:
+            self.toggle_slideshow()
+            return
+        if a == self.INFO:
+            self.toggle_bar()
+            return
+        if a in self.MENU:
+            self.options()
+            return
         if a in (self.RIGHT, self.NEXT_ITEM, self.DOWN, self.MOUSE_CLICK):
             self.move(1)
         elif a in (self.LEFT, self.PREV_ITEM, self.UP):
@@ -581,14 +717,13 @@ def _backdrop():
     return path
 
 
+def listing_from(p):
+    return {k: p.get(k, "") for k in ("chats", "kind", "cursor", "unread", "src", "q", "title")}
+
+
 def viewer(p):
-    q = {"chats": p.get("chats", "all"), "kind": p.get("kind", "all"),
-         "n": common.setting_int("page_size", 50, 10, 200)}
-    if p.get("cursor"):
-        q["cursor"] = p["cursor"]
-    if p.get("unread") == "1":
-        q["unread"] = "1"
-    res = api("media?" + urlencode(q))
+    q = listing_from(p)
+    res = fetch_page(q)
     items = res["items"]
     if not items:
         notify("Nothing to show")
@@ -602,14 +737,17 @@ def viewer(p):
         if "%d_%d" % (it["chat_id"], it["msg_id"]) == start:
             index = i
             break
-    q.pop("cursor", None)
     next_cursor = res.get("next")
     monitor = xbmc.Monitor()
     while True:
         win = PhotoViewer(items, index, next_cursor, q)
         win.doModal()
-        it, index, next_cursor = win.play_item, win.index, win.next_cursor
+        it, index, next_cursor, goto = win.play_item, win.index, win.next_cursor, win.goto_chat
         del win
+        if goto:
+            xbmc.executebuiltin("Container.Update(%s)" % url_for(
+                mode="chat", id=goto["chat_id"], title=goto.get("chat_title") or ""))
+            return
         if not it:
             return
         # Play, then return to the viewer at the same place when the video ends/stops.
@@ -622,6 +760,83 @@ def viewer(p):
             pass
         if monitor.abortRequested():
             return
+
+
+def play_all(p):
+    """Queue every video on the page (from the chosen one, if any) and play."""
+    res = fetch_page(listing_from(p))
+    vids = [it for it in res["items"] if it["kind"] == "video"]
+    start = p.get("start")
+    if start:
+        keys = ["%d_%d" % (v["chat_id"], v["msg_id"]) for v in vids]
+        if start in keys:
+            vids = vids[keys.index(start):]
+    if not vids:
+        notify("No videos on this page")
+        return
+    pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+    pl.clear()
+    for it in vids:
+        url = media_url("stream", it["chat_id"], it["msg_id"], it.get("ext") or ".mp4")
+        title = (it.get("text") or "").strip().split("\n")[0][:90] or it.get("name") or "Video"
+        li = xbmcgui.ListItem(title, path=url)
+        li.setArt({"thumb": media_url("thumb", it["chat_id"], it["msg_id"])})
+        li.setMimeType(it.get("mime") or "video/mp4")
+        li.setContentLookup(False)
+        pl.add(url, li)
+    _prefetch_video(vids[0]["chat_id"], vids[0]["msg_id"])
+    xbmc.Player().play(pl)
+
+
+def search_prompt(p):
+    home = xbmcgui.Window(10000)
+    last = home.getProperty("tg.last_search")
+    where = p.get("title") or "all chats"
+    query = xbmcgui.Dialog().input("Search %s" % where, defaultt=last)
+    if not query:
+        return
+    home.setProperty("tg.last_search", query)
+    kind = xbmcgui.Dialog().select("Search for", ["Photos and videos", "Photos only", "Videos only"])
+    if kind < 0:
+        return
+    xbmc.executebuiltin("Container.Update(%s)" % url_for(
+        mode="media", src="search", q=query, chats=p.get("chats", "all"),
+        kind=("all", "photo", "video")[kind], title="Search: %s" % query))
+
+
+def mark_read(chat):
+    try:
+        api("read", {"chat": int(chat)}, timeout=60)
+        notify("Marked as read")
+    except (ApiError, ServiceDown) as e:
+        notify("Couldn't mark as read: %s" % e)
+
+
+def save_item(chat, msg):
+    folder = common.setting("download_folder")
+    if not folder:
+        folder = xbmcgui.Dialog().browse(3, "Choose where to save Telegram files", "files")
+        if not folder:
+            return
+        ADDON.setSetting("download_folder", folder)
+    import xbmcvfs
+    path = xbmcvfs.translatePath(folder)
+    try:
+        api("save", {"chat": int(chat), "msg": int(msg), "folder": path}, timeout=30)
+        notify("Saving in the background...")
+    except (ApiError, ServiceDown) as e:
+        notify("Couldn't save: %s" % e)
+
+
+def clear_cache():
+    if not xbmcgui.Dialog().yesno("Telegram", "Delete cached thumbnails and photos and reload lists?"):
+        return
+    try:
+        api("clear_cache", {}, timeout=120)
+        notify("Cache cleared")
+    except (ApiError, ServiceDown) as e:
+        notify("Couldn't clear cache: %s" % e)
+    xbmc.executebuiltin("Container.Refresh")
 
 
 def play_video(it):
@@ -664,7 +879,19 @@ def router():
             unread_menu()
         elif mode == "media":
             media(PARAMS.get("chats", "all"), PARAMS.get("kind", "all"), PARAMS.get("cursor"),
-                  PARAMS.get("title", ""), PARAMS.get("unread") == "1")
+                  PARAMS.get("title", ""), PARAMS.get("unread") == "1",
+                  PARAMS.get("src") or "media", PARAMS.get("q", ""))
+        elif mode == "playall":
+            play_all(PARAMS)
+        elif mode == "search_prompt":
+            search_prompt(PARAMS)
+        elif mode == "read":
+            mark_read(PARAMS["chat"])
+            xbmc.executebuiltin("Container.Refresh")
+        elif mode == "save":
+            save_item(PARAMS["chat"], PARAMS["msg"])
+        elif mode == "clear_cache":
+            clear_cache()
         elif mode == "show_image":
             xbmc.executebuiltin("ShowPicture(%s)" % PARAMS["url"])
         elif mode in ("viewer", "slideshow"):  # slideshow = links from 1.3.0

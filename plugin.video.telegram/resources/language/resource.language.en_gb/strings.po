@@ -92,3 +92,15 @@ msgstr ""
 msgctxt "#30030"
 msgid "Uses the skin's Wall view (Estuary). Turn off if your skin shows something odd."
 msgstr ""
+
+msgctxt "#30031"
+msgid "Photo slideshow: seconds per photo"
+msgstr ""
+
+msgctxt "#30032"
+msgid "Folder for 'Save to device'"
+msgstr ""
+
+msgctxt "#30033"
+msgid "Where saved photos and videos go. Asked the first time if empty."
+msgstr ""

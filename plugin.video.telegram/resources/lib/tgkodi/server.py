@@ -165,6 +165,7 @@ class Engine(object):
         self._chunk_sem = None
         self._prefetch_sem = None
         self._prewarmed = False
+        self.notify = lambda msg: None  # service.py sets this to a Kodi notification
         self.cache_dir = os.path.join(profile, "cache")
         for sub in ("thumbs", "photos", "avatars"):
             os.makedirs(os.path.join(self.cache_dir, sub), exist_ok=True)
@@ -463,9 +464,96 @@ class Engine(object):
         latest = {d["id"]: d["date"] for d in dl if d.get("date")}
         index_kind = kind + (":unread" if unread else "")
         items, nxt = await self.index.page(ids, index_kind, decode_cursor(cursor), n, latest=latest)
+        self._after_listing(items)
+        return {"items": items, "next": nxt}
+
+    def _after_listing(self, items):
+        """Start thumbnail downloads for the page and pre-load the first videos, so
+        Kodi's own requests (which come a moment later) are already in flight/cached."""
+        for it in items:
+            cid, mid = it["chat_id"], it["msg_id"]
+            self.loop.create_task(self._quiet(self._cached(
+                "thumbs", "%d_%d.jpg" % (cid, mid), lambda c=cid, m=mid: self._dl_thumb(c, m))))
         for it in [i for i in items if i["kind"] == "video"][:PREFETCH_VIDEOS]:
             self._prefetch(it["chat_id"], it["msg_id"])
-        return {"items": items, "next": nxt}
+
+    async def search(self, query, chats, kind, offset, n):
+        """Caption/file-name search. One chat: Telegram's per-chat search. "all": Telegram's
+        global search. Pagination by item count (global search can't resume from an id)."""
+        if kind not in FILTERS:
+            raise _HttpError(400, "bad kind")
+        query = (query or "").strip()
+        if not query:
+            return {"items": [], "next": None}
+        client = await self._authed_client()
+        dl = await self.dialogs()
+        titles = {d["id"]: d["title"] for d in dl}
+        entity = None if chats == "all" else await self.entity(int(chats))
+        want = min(offset + n + 1, 1000)
+        items = []
+        async for m in client.iter_messages(entity, search=query, filter=FILTERS[kind], limit=want):
+            cid = m.chat_id if entity is None else int(chats)
+            title = titles.get(cid) or (utils.get_display_name(m.chat) if m.chat else "")
+            it = message_to_item(m, cid, title or "")
+            if it:
+                if cid not in self.entities and m.input_chat is not None:
+                    self.entities[cid] = m.input_chat
+                self._remember(cid, m)
+                items.append(it)
+        page = items[offset:offset + n]
+        nxt = str(offset + n) if len(items) > offset + n else None
+        self._after_listing(page)
+        return {"items": page, "next": nxt}
+
+    async def mark_read(self, chat_id):
+        client = await self._authed_client()
+        ent = await self.entity(chat_id)
+        await client.send_read_acknowledge(ent, clear_mentions=True)
+        for d in self.dialog_list:
+            if d["id"] == chat_id:
+                d["unread"] = 0
+        return {"ok": True}
+
+    def save_to_device(self, chat_id, msg_id, folder):
+        """Download the original file into `folder` in the background."""
+        async def run():
+            try:
+                m = await self.message(chat_id, msg_id)
+                it = message_to_item(m, chat_id, self._title(chat_id)) or {}
+                name = it.get("name") or "telegram_%d_%d%s" % (
+                    chat_id, msg_id, ".jpg" if it.get("kind") == "photo" else it.get("ext", ".mp4"))
+                name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip() or "telegram_%d" % msg_id
+                os.makedirs(folder, exist_ok=True)
+                path = os.path.join(folder, name)
+                base, ext = os.path.splitext(path)
+                k = 1
+                while os.path.exists(path):
+                    path = "%s (%d)%s" % (base, k, ext)
+                    k += 1
+                client = await self._authed_client()
+                tmp = path + ".part"
+                await client.download_media(m, file=tmp)
+                os.replace(tmp, path)
+                self.notify("Saved %s" % os.path.basename(path))
+            except Exception as e:
+                self._log("save failed: %r" % e)
+                self.notify("Save failed: %s" % (getattr(e, "msg", None) or e))
+        self.loop.create_task(run())
+        return {"ok": True}
+
+    def clear_cache(self):
+        import shutil
+        for sub in ("thumbs", "photos", "avatars"):
+            d = os.path.join(self.cache_dir, sub)
+            shutil.rmtree(d, ignore_errors=True)
+            os.makedirs(d, exist_ok=True)
+        self._chunks.clear()
+        self._chunk_bytes = 0
+        self.msg_cache.clear()
+        self.dialogs_at = 0
+        if self.index:
+            self.index.clear()
+        return {"ok": True}
 
     def _prefetch(self, cid, mid):
         """Start fetching the beginning of a video (and its end if the file isn't
@@ -605,10 +693,18 @@ class Engine(object):
     async def _prewarm_dcs(self):
         """Media often lives on another data centre. The first use of each one needs a
         key exchange that can take seconds on a TV box; do it now, in the background."""
-        await asyncio.sleep(5)  # let the first menus load first
         client = self.client
         if client is None:
             return
+        # 1. Chat list and the first "All Mixed" page, so the main menus open instantly.
+        try:
+            await self.dialogs()
+            await self.media_page("all", "all", None, self.cfg.get("page_size", 50))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._log("warm-up of lists failed: %r" % e)
+        # 2. Other data centres (where media often lives).
         home = client.session.dc_id
         for dc in (1, 2, 3, 4, 5):
             if dc == home or self.client is not client:
@@ -868,6 +964,16 @@ class Engine(object):
             res = self.login_qr_status()
         elif name == "login/qr/cancel" and method == "POST":
             res = await self.login_qr_cancel()
+        elif name == "search":
+            n = max(10, min(200, int(q.get("n", self.cfg.get("page_size", 50)))))
+            res = await self.search(q.get("q", ""), q.get("chats", "all"), q.get("kind", "all"),
+                                    int(q.get("cursor") or 0), n)
+        elif name == "read" and method == "POST":
+            res = await self.mark_read(int(payload.get("chat", 0)))
+        elif name == "save" and method == "POST":
+            res = self.save_to_device(int(payload["chat"]), int(payload["msg"]), payload["folder"])
+        elif name == "clear_cache" and method == "POST":
+            res = self.clear_cache()
         elif name == "prefetch":
             self._prefetch(int(q.get("chat", 0)), int(q.get("msg", 0)))
             res = {"ok": True}

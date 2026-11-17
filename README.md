@@ -21,6 +21,13 @@ Installing via the repository means Kodi picks up new versions automatically.
 2. Run `python3 tools/build_repo.py` (regenerates `docs/`).
 3. Commit and push. GitHub Pages serves `docs/` from `main`.
 
+## Using it
+- **Search** (main menu, or *Search in this chat* inside a chat) finds photos/videos by caption or file name.
+- **Play all videos** at the top of a list queues the page's videos; long-press a video for *Play all videos from here*.
+- Long-press any photo/video: open in viewer, go to its chat, save to device (folder asked once, then in settings), mark chat as read.
+- **Viewer** (tap a photo): Left/Right = previous/next, OK on a video = play, Play/Pause = slideshow, Info = hide/show caption bar, Menu = options, Back = close.
+- Lists show video length, resolution and size; the main menu has a Saved Messages shortcut and *Clear cache*.
+
 ## Notes
 - Built with Telethon 1.45.0 (bundled). Fast decryption via bundled `cryptg` for Windows x64, Python 3.11–3.14.
 - Elsewhere (Android/ARM boxes, Linux) `tgkodi/fastcrypto.py` finds the OpenSSL libcrypto Kodi already has loaded and uses it for AES-IGE after a self-test; if none is found it falls back to pure Python (slow). The main menu's *crypto* line shows which is in use.

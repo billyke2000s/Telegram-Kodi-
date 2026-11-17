@@ -5,6 +5,7 @@ import logging
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "lib"))
 
 import xbmc  # noqa: E402
+import xbmcgui  # noqa: E402
 
 from tgkodi import common  # noqa: E402
 
@@ -51,6 +52,8 @@ def main():
         common.log("fastcrypto failed: %r" % e, xbmc.LOGWARNING)
 
     engine = Engine(common.profile_dir(), common.get_token(create=True), common.log)
+    icon = common.addon().getAddonInfo("icon")
+    engine.notify = lambda msg: xbmcgui.Dialog().notification("Telegram", msg, icon, 4000)
     try:
         engine.start(read_config())
     except Exception as e:
