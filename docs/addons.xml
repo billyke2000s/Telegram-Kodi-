@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addons>
-<addon id="repository.telegramkodi" name="Telegram Kodi Repository" version="1.0.1" provider-name="Billy">
+<addon id="repository.telegramkodi" name="Telegram Kodi Repository" version="1.0.2" provider-name="Billy">
     <extension point="xbmc.addon.repository" name="Telegram Kodi Repository">
-        <info compressed="false">https://billyke2000s.github.io/Telegram-Kodi-/addons.xml</info>
-        <checksum>https://billyke2000s.github.io/Telegram-Kodi-/addons.xml.md5</checksum>
-        <datadir zip="true">https://billyke2000s.github.io/Telegram-Kodi-/</datadir>
-        <hashes>false</hashes>
+        <!-- Kodi 19+ only reads <dir> blocks; files served straight from GitHub. -->
+        <dir>
+            <info compressed="false">https://raw.githubusercontent.com/billyke2000s/Telegram-Kodi-/main/docs/addons.xml</info>
+            <checksum>https://raw.githubusercontent.com/billyke2000s/Telegram-Kodi-/main/docs/addons.xml.md5</checksum>
+            <datadir zip="true">https://raw.githubusercontent.com/billyke2000s/Telegram-Kodi-/main/docs/</datadir>
+            <hashes>false</hashes>
+        </dir>
     </extension>
     <extension point="xbmc.addon.metadata">
         <summary lang="en_GB">Installs and updates the Telegram Media add-on</summary>

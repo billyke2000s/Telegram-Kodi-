@@ -7,7 +7,7 @@ If the repository won't connect, choose `plugin.video.telegram-<version>.zip` fr
 
 1. Kodi → *Settings → System → Add-ons* → turn on **Unknown sources**.
 2. *Settings → File manager → Add source* → enter `https://billyke2000s.github.io/Telegram-Kodi-/` and name it `telegram`.
-3. *Add-ons → Install from zip file → telegram* → `repository.telegramkodi-1.0.0.zip`.
+3. *Add-ons → Install from zip file → telegram* → `repository.telegramkodi-<version>.zip`.
 4. *Install from repository → Telegram Kodi Repository → Video add-ons → Telegram Media → Install*.
 5. Restart Kodi so the background service starts.
 6. Get an API ID and API hash from https://my.telegram.org → API development tools and enter them in the add-on settings.
@@ -19,7 +19,7 @@ Installing via the repository means Kodi picks up new versions automatically.
 ## Publishing an update
 1. Bump `version` in `plugin.video.telegram/addon.xml`.
 2. Run `python3 tools/build_repo.py` (regenerates `docs/`).
-3. Commit and push. GitHub Pages serves `docs/` from `main`.
+3. Commit and push. GitHub Pages serves `docs/` from `main` (the browsable source); the repository add-on reads `addons.xml` and zips from raw.githubusercontent.com in the same `docs/` folder.
 
 ## Using it
 - **Search** (main menu, or *Search in this chat* inside a chat) finds photos/videos by caption or file name.
