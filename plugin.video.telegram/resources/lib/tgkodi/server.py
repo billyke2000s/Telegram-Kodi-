@@ -18,7 +18,10 @@ import time
 from collections import OrderedDict
 from urllib.parse import parse_qs, unquote
 
-from telethon import TelegramClient, errors, types, utils
+import base64
+import datetime
+
+from telethon import TelegramClient, errors, events, functions, types, utils
 from telethon.sessions import StringSession
 
 from .mediaindex import MediaIndex, decode_cursor
@@ -135,6 +138,8 @@ class Engine(object):
         self.authorized = False
         self.me = None
         self.phone = None
+        self._qr_task = None
+        self._qr_state = {"state": "idle"}
         self.last_error = ""
         self.server = None
         self.entities = {}
@@ -251,6 +256,10 @@ class Engine(object):
             pass
 
     async def _drop_client(self):
+        if self._qr_task and not self._qr_task.done():
+            self._qr_task.cancel()
+        self._qr_task = None
+        self._qr_state = {"state": "idle"}
         if self.client:
             try:
                 if self.authorized:
@@ -446,6 +455,88 @@ class Engine(object):
             raise _HttpError(503, self.last_error)
         await client.sign_in(password=password)
         return await self._login_done()
+
+    # QR login: the TV shows tg://login?token=..., the phone's Telegram app scans it
+    # (Settings > Devices > Link Desktop Device). No SMS/app code is needed.
+
+    async def login_qr_start(self):
+        client = await self._ensure_client()
+        if client is None:
+            raise _HttpError(503, self.last_error)
+        if self.authorized:
+            return {"state": "done"}
+        await self.login_qr_cancel()
+        self._qr_state = {"state": "starting"}
+        self._qr_task = self.loop.create_task(self._qr_loop(client))
+        # Give the first token a moment so the caller can draw the QR straight away.
+        for _ in range(50):
+            if self._qr_state["state"] != "starting":
+                break
+            await asyncio.sleep(0.1)
+        return dict(self._qr_state)
+
+    def login_qr_status(self):
+        return dict(self._qr_state)
+
+    async def login_qr_cancel(self):
+        task, self._qr_task = self._qr_task, None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._qr_state.get("state") in ("starting", "waiting"):
+            self._qr_state = {"state": "idle"}
+        return {"ok": True}
+
+    async def _qr_loop(self, client, max_seconds=300):
+        req = functions.auth.ExportLoginTokenRequest(client.api_id, client.api_hash, [])
+        scanned = asyncio.Event()
+
+        async def on_token(_update):
+            scanned.set()
+
+        # The client normally wraps requests in invokeWithoutUpdates, which would stop
+        # Telegram pushing updateLoginToken to us. Allow updates only while the QR is up.
+        # Even if that update is missed, re-exporting at expiry returns loginTokenSuccess
+        # once the code has been accepted, so login still completes.
+        client._no_updates = False
+        client.add_event_handler(on_token, events.Raw(types.UpdateLoginToken))
+        deadline = time.time() + max_seconds
+        try:
+            while True:
+                resp = await client(req)
+                if isinstance(resp, types.auth.LoginTokenMigrateTo):
+                    await client._switch_dc(resp.dc_id)
+                    resp = await client(functions.auth.ImportLoginTokenRequest(resp.token))
+                if isinstance(resp, types.auth.LoginTokenSuccess):
+                    await client._on_login(resp.authorization.user)
+                    res = await self._login_done()
+                    self._qr_state = {"state": "done" if res.get("ok") else "error",
+                                      "error": "" if res.get("ok") else "login did not complete"}
+                    return
+                if time.time() >= deadline:
+                    self._qr_state = {"state": "expired"}
+                    return
+                token = base64.urlsafe_b64encode(resp.token).decode("ascii").rstrip("=")
+                self._qr_state = {"state": "waiting", "url": "tg://login?token=" + token}
+                left = (resp.expires - datetime.datetime.now(tz=datetime.timezone.utc)).total_seconds()
+                scanned.clear()
+                try:
+                    await asyncio.wait_for(scanned.wait(), timeout=max(5.0, min(left, 60.0)))
+                except asyncio.TimeoutError:
+                    pass
+        except errors.SessionPasswordNeededError:
+            self._qr_state = {"state": "need_password"}
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._log("QR login error: %r" % e)
+            self._qr_state = {"state": "error", "error": str(e) or e.__class__.__name__}
+        finally:
+            client.remove_event_handler(on_token)
+            client._no_updates = True
 
     async def _login_done(self):
         self.authorized = await self.client.is_user_authorized()
@@ -663,6 +754,12 @@ class Engine(object):
             res = await self.login_code(payload.get("code", ""))
         elif name == "login/password" and method == "POST":
             res = await self.login_password(payload.get("password", ""))
+        elif name == "login/qr/start" and method == "POST":
+            res = await self.login_qr_start()
+        elif name == "login/qr/status":
+            res = self.login_qr_status()
+        elif name == "login/qr/cancel" and method == "POST":
+            res = await self.login_qr_cancel()
         elif name == "logout" and method == "POST":
             res = await self.logout()
         else:

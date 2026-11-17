@@ -124,7 +124,11 @@ def root():
     if not st.get("authorized"):
         if st.get("error"):
             add_dir("[COLOR red]%s[/COLOR]" % st["error"], url_for(mode="status"), folder=False)
-        add_dir("Step 2: Log in to Telegram", url_for(mode="login"), folder=False,
+        add_dir("Step 2: Log in with QR code (recommended)", url_for(mode="login_qr"), folder=False,
+                plot="Shows a QR code on screen. On your phone open Telegram > Settings > Devices > "
+                     "Link Desktop Device and scan it. No login code needed. If your account has a "
+                     "two-step verification password you'll be asked for it afterwards.")
+        add_dir("Log in with phone number instead", url_for(mode="login"), folder=False,
                 plot="You'll be asked for your phone number, the code Telegram sends you, and your 2FA password if you have one.")
         add_dir("Settings", url_for(mode="settings"), folder=False)
         return end()
@@ -255,6 +259,136 @@ def add_media_item(it, combined):
 
 # ------------------------------------------------------------------ actions
 
+class QrWindow(xbmcgui.WindowDialog):
+    """Full-screen QR code. WindowDialog uses a 1280x720 coordinate space."""
+    CENTER = 0x00000002  # XBFONT_CENTER_X
+    BACK_ACTIONS = (9, 10, 92, 13)  # parent dir, previous menu, back, stop
+
+    def __init__(self, backdrop):
+        xbmcgui.WindowDialog.__init__(self)
+        self.closed = False
+        self.addControl(xbmcgui.ControlImage(0, 0, 1280, 720, backdrop, colorDiffuse="F0000000"))
+        self.addControl(xbmcgui.ControlLabel(
+            0, 40, 1280, 40, "[B]Log in to Telegram[/B]", font="font30",
+            textColor="0xFFFFFFFF", alignment=self.CENTER))
+        self.qr = xbmcgui.ControlImage(450, 110, 380, 380, "")
+        self.addControl(self.qr)
+        self.status = xbmcgui.ControlLabel(
+            0, 505, 1280, 30, "Getting a code from Telegram...", font="font13",
+            textColor="0xFFFFFFFF", alignment=self.CENTER)
+        self.addControl(self.status)
+        for i, line in enumerate((
+                "On your phone open Telegram > Settings > Devices > Link Desktop Device",
+                "and point the camera at this code. It refreshes automatically.",
+                "Press Back to cancel.")):
+            self.addControl(xbmcgui.ControlLabel(
+                0, 550 + i * 32, 1280, 30, line, font="font13",
+                textColor="0xFFCCCCCC", alignment=self.CENTER))
+
+    def set_qr(self, path):
+        self.qr.setImage(path, False)
+        self.status.setLabel("Waiting for you to scan...")
+
+    def onAction(self, action):
+        if action.getId() in self.BACK_ACTIONS:
+            self.closed = True
+            self.close()
+
+
+def _qr_files():
+    from tgkodi import qrimage
+    folder = os.path.join(common.profile_dir(), "qr")
+    os.makedirs(folder, exist_ok=True)
+    for name in os.listdir(folder):  # old codes are useless once replaced
+        if name.startswith("qr_"):
+            try:
+                os.remove(os.path.join(folder, name))
+            except OSError:
+                pass
+    backdrop = os.path.join(folder, "backdrop.png")
+    if not os.path.exists(backdrop):
+        qrimage.write_solid(backdrop)
+    return folder, backdrop
+
+
+def login_qr():
+    from tgkodi import qrimage
+    dlg = xbmcgui.Dialog()
+    try:
+        st = api("login/qr/start", {}, timeout=60)
+    except ApiError as e:
+        dlg.ok("Telegram", "Couldn't start QR login:\n%s" % e.msg)
+        return
+    if st.get("state") == "done":
+        notify("Already logged in")
+        xbmc.executebuiltin("Container.Refresh")
+        return
+
+    folder, backdrop = _qr_files()
+    win = QrWindow(backdrop)
+    win.show()
+    monitor = xbmc.Monitor()
+    shown, n = None, 0
+    try:
+        while not win.closed and not monitor.abortRequested():
+            state = st.get("state")
+            if state == "waiting" and st.get("url") != shown:
+                n += 1
+                # Unique name per code, otherwise Kodi's texture cache shows the old one.
+                path = os.path.join(folder, "qr_%d_%d.png" % (int(time.time()), n))
+                qrimage.write_qr(st["url"], path)
+                win.set_qr(path)
+                shown = st["url"]
+            elif state not in ("waiting", "starting"):
+                break
+            if monitor.waitForAbort(1):
+                break
+            st = api("login/qr/status", timeout=30)
+    finally:
+        cancelled = win.closed
+        win.close()
+        del win
+        _qr_files()
+
+    state = st.get("state")
+    if cancelled or state in ("waiting", "starting"):
+        try:
+            api("login/qr/cancel", {}, timeout=30)
+        except (ApiError, ServiceDown):
+            pass
+        return
+    if state == "need_password":
+        if not _ask_password(dlg):
+            return
+    elif state == "done":
+        notify("Logged in")
+    elif state == "expired":
+        dlg.ok("Telegram", "The QR code timed out. Choose 'Log in with QR code' to try again.")
+        return
+    else:
+        dlg.ok("Telegram", "QR login failed:\n%s" % (st.get("error") or state))
+        return
+    xbmc.executebuiltin("Container.Refresh")
+
+
+def _ask_password(dlg):
+    """Two-step verification. Returns True once logged in."""
+    pw = dlg.input("Two-step verification password (your Telegram cloud password)",
+                   option=xbmcgui.ALPHANUM_HIDE_INPUT)
+    if not pw:
+        return False
+    try:
+        res = api("login/password", {"password": pw}, timeout=120)
+    except ApiError as e:
+        dlg.ok("Telegram", "Login failed:\n%s" % e.msg)
+        return False
+    if res.get("ok"):
+        notify("Logged in")
+        return True
+    dlg.ok("Telegram", "Login did not complete.")
+    return False
+
+
 def login():
     dlg = xbmcgui.Dialog()
     phone = dlg.input("Phone number in international format (e.g. +447700900123)")
@@ -319,6 +453,8 @@ def router():
             xbmc.executebuiltin("ShowPicture(%s)" % PARAMS["url"])
         elif mode == "login":
             login()
+        elif mode == "login_qr":
+            login_qr()
         elif mode == "logout":
             logout()
         elif mode == "settings":
