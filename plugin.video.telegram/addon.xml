@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="plugin.video.telegram" name="Telegram Media" version="1.6.0" provider-name="Billy">
+<addon id="plugin.video.telegram" name="Telegram Media" version="1.7.0" provider-name="Billy">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
     </requires>
@@ -13,7 +13,8 @@
         <disclaimer lang="en_GB">Unofficial. Not affiliated with Telegram. Your session key is stored in the add-on profile folder - anyone with that file can access your Telegram account.</disclaimer>
         <platform>all</platform>
         <license>MIT</license>
-        <news>1.6.0: Search (all chats or one chat); Play all / play from here; long-press menus (go to chat, save to device, mark as read); video length, resolution and size on items; viewer slideshow (Play/Pause), Info hides captions, Menu for options; Saved Messages shortcut; Clear cache; lists and thumbnails pre-loaded at start-up.
+        <news>1.7.0: Much faster decryption on Android boxes - a tiny bundled helper does the work in native code using Kodi's own OpenSSL (about 5x the previous "medium speed" mode).
+1.6.0: Search (all chats or one chat); Play all / play from here; long-press menus (go to chat, save to device, mark as read); video length, resolution and size on items; viewer slideshow (Play/Pause), Info hides captions, Menu for options; Saved Messages shortcut; Clear cache; lists and thumbnails pre-loaded at start-up.
 1.5.0: Videos start faster - shared 128 MB chunk cache (Kodi's probing no longer re-downloads), first seconds of listed videos pre-loaded, Telegram data-centre connections warmed up and kept open. Thumbnail wall view, page numbers, viewer returns after a video.
 1.4.0: Own full-screen photo viewer (left/right, continues onto next page, OK plays videos); videos restart stalled downloads instead of failing; no 2-minute silent waits; smaller thumbnails; more ways to find fast decryption.
 1.3.0: Much faster on Android/ARM boxes (uses Kodi's own OpenSSL instead of pure-Python decryption); photos open in a slideshow so left/right switches images.

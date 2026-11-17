@@ -11,8 +11,11 @@ far less on ARM). Kodi itself ships OpenSSL, so we look for it in:
 
 Three ways of using it, best first, tried across all candidates in that order:
 
-  ige   - AES_ige_encrypt does the whole buffer in C            (tens of MB/s)
-  block - AES_encrypt/AES_decrypt per 16-byte block, IGE chaining in Python
+  ige    - AES_ige_encrypt does the whole buffer in C           (tens of MB/s)
+  native - bundled tiny C helper (_native/ige/<arch>/libtgige.so) does the IGE chaining
+           and calls the library's AES_encrypt/AES_decrypt per block (almost as fast).
+           Kodi on Android has AES_encrypt/AES_decrypt in libkodi.so but no IGE.
+  block  - AES_encrypt/AES_decrypt per 16-byte block, IGE chaining in Python
   evp   - EVP AES-ECB per block (always present where TLS works), chaining in Python
 
 "block"/"evp" are roughly 10x faster than pure Python. Every candidate must pass a
@@ -21,8 +24,14 @@ used, so a wrong library can only cost speed, never correctness.
 """
 import ctypes
 import ctypes.util
+import hashlib
 import os
+import platform
+import shutil
+import struct
 import sys
+
+_NATIVE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_native", "ige")
 
 ACTIVE = None  # human-readable description of what is in use, for the status screen
 
@@ -180,7 +189,111 @@ def _ige_evp(lib):
     return run
 
 
-_TIERS = (("ige", _ige_full), ("block", _ige_block), ("evp", _ige_evp))
+def _arch():
+    bits = struct.calcsize("P") * 8  # the Kodi process, not the kernel (32-bit Kodi on 64-bit boxes)
+    m = platform.machine().lower()
+    if m.startswith(("arm", "aarch")):
+        return "arm64" if bits == 64 else "arm"
+    if m in ("x86_64", "amd64", "i386", "i686", "x86"):
+        return "x86_64" if bits == 64 else "x86"
+    return None
+
+
+def _private_dirs():
+    """App-private, executable locations. Android mounts shared storage (where Kodi's
+    add-ons usually live) noexec, so the helper may need copying somewhere internal."""
+    out = []
+
+    def add(d):
+        if d and d.startswith("/data/") and d not in out:
+            out.append(d)
+    paths = []
+    try:
+        with open("/proc/self/maps", "r") as maps:
+            paths = [ln.rstrip("\n").split(" ")[-1] for ln in maps]
+    except (IOError, OSError):
+        pass
+    for p in paths:
+        parts = p.split("/")
+        if p.startswith("/data/user/") and len(parts) > 4:      # /data/user/0/<pkg>/...
+            add("/".join(parts[:5]) + "/cache")
+            add("/".join(parts[:5]) + "/files")
+        elif p.startswith("/data/data/") and len(parts) > 3:    # /data/data/<pkg>/...
+            add("/".join(parts[:4]) + "/cache")
+        elif p.startswith("/data/app/") and p.endswith("/libkodi.so"):  # .../<pkg>-<hash>/lib/..
+            for seg in parts:
+                if "-" in seg and "." in seg.split("-")[0]:
+                    add("/data/data/%s/cache" % seg.split("-")[0])
+    for d in (os.path.dirname(os.__file__), os.environ.get("TMPDIR"), os.environ.get("HOME")):
+        add(d)
+    return out
+
+
+_helper_cache = []
+
+
+def _helper(extra_dirs=()):
+    """Load the bundled IGE helper, copying it to a private dir if needed. None if impossible."""
+    if _helper_cache:
+        return _helper_cache[0]
+    lib = None
+    arch = _arch()
+    src = os.path.join(_NATIVE_DIR, arch or "-", "libtgige.so")
+    if arch and os.path.exists(src):
+        try:
+            lib = ctypes.CDLL(src)
+        except OSError:
+            data = open(src, "rb").read()
+            name = "libtgige-%s.so" % hashlib.md5(data).hexdigest()[:12]
+            for d in list(extra_dirs) + _private_dirs():
+                try:
+                    dst_dir = os.path.join(d, "tgkodi_native")
+                    os.makedirs(dst_dir, exist_ok=True)
+                    dst = os.path.join(dst_dir, name)
+                    if not os.path.exists(dst):
+                        shutil.copyfile(src, dst + ".tmp")
+                        os.chmod(dst + ".tmp", 0o755)
+                        os.replace(dst + ".tmp", dst)
+                    lib = ctypes.CDLL(dst)
+                    break
+                except OSError:
+                    continue
+    if lib is not None:
+        try:
+            if lib.tg_ige_version() != 1:
+                lib = None
+        except AttributeError:
+            lib = None
+    _helper_cache.append(lib)
+    return lib
+
+
+def _ige_native(lib):
+    helper = _helper()
+    if helper is None:
+        raise OSError("no IGE helper for this platform")
+    set_enc = _proto(lib.AES_set_encrypt_key, [ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p], ctypes.c_int)
+    set_dec = _proto(lib.AES_set_decrypt_key, [ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p], ctypes.c_int)
+    fn_enc = ctypes.cast(lib.AES_encrypt, ctypes.c_void_p).value
+    fn_dec = ctypes.cast(lib.AES_decrypt, ctypes.c_void_p).value
+    if not fn_enc or not fn_dec:
+        raise AttributeError("AES_encrypt/AES_decrypt missing")
+    tg = _proto(helper.tg_ige, [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+                                ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p], ctypes.c_int)
+
+    def run(data, key, iv, enc):
+        data, key = bytes(data), bytes(key)
+        k = _aes_key_buf()
+        if (set_enc if enc else set_dec)(key, len(key) * 8, k) != 0:
+            raise ValueError("bad AES key")
+        out = ctypes.create_string_buffer(len(data))
+        if tg(data, out, len(data), k, bytes(iv), 1 if enc else 0, fn_enc if enc else fn_dec) != 0:
+            raise ValueError("IGE length must be a multiple of 16")
+        return out.raw
+    return run
+
+
+_TIERS = (("ige", _ige_full), ("native", _ige_native), ("block", _ige_block), ("evp", _ige_evp))
 
 
 def _self_test(run):
@@ -219,7 +332,7 @@ def install(log=lambda m: None):
             libssl.decrypt_ige = lambda d, k, i, _r=run: _r(d, k, i, False)
             libssl.encrypt_ige = lambda d, k, i, _r=run: _r(d, k, i, True)
             ACTIVE = "OpenSSL %s (%s)%s" % (tier, os.path.basename(cand),
-                                            "" if tier == "ige" else " - medium speed")
+                                            " - fast" if tier in ("ige", "native") else " - medium speed")
             log("fastcrypto: using %s" % ACTIVE)
             return ACTIVE
     ACTIVE = None
