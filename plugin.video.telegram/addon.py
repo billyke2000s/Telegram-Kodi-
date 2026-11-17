@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode
@@ -274,7 +275,7 @@ def add_media_item(it, combined, listing=None):
             set_plot(li, text)
             li.setProperty("IsPlayable", "false")
             if listing:
-                path = url_for(mode="slideshow", start=full, **listing)
+                path = url_for(mode="viewer", start="%d_%d" % (cid, mid), **listing)
             else:
                 path = url_for(mode="show_image", url=full)
         xbmcplugin.addDirectoryItem(HANDLE, path, li, isFolder=False)
@@ -458,13 +459,145 @@ def login():
     xbmc.executebuiltin("Container.Refresh")
 
 
-def slideshow(p):
-    """Open Kodi's picture slideshow over the current page, starting at the tapped
-    photo, so left/right moves between photos. Videos on the page are skipped or
-    played by the slideshow depending on Kodi's picture settings."""
-    listing = url_for(mode="media", ct="image", chats=p.get("chats", "all"), kind=p.get("kind", "all"),
-                      cursor=p.get("cursor", ""), title=p.get("title", ""), unread=p.get("unread", "0"))
-    xbmc.executebuiltin('SlideShow("%s",beginslide="%s")' % (listing, p["start"]))
+class PhotoViewer(xbmcgui.WindowDialog):
+    """Full-screen viewer for a media listing: left/right = previous/next, OK on a video
+    plays it, Back closes. Carries on into the next page automatically. Kodi's own
+    SlideShow() sorts by label and can't page, so we drive navigation ourselves."""
+    LEFT, RIGHT, UP, DOWN, SELECT = 1, 2, 3, 4, 7
+    NEXT_ITEM, PREV_ITEM, MOUSE_CLICK = 14, 15, 100
+    BACK = (9, 10, 92, 13)
+    CENTER = 0x00000002
+
+    def __init__(self, items, index, next_cursor, query):
+        xbmcgui.WindowDialog.__init__(self)
+        self.items, self.index, self.next_cursor, self.query = items, index, next_cursor, query
+        self.play_item = None
+        backdrop = _backdrop()
+        self.addControl(xbmcgui.ControlImage(0, 0, 1280, 720, backdrop))
+        self.image = xbmcgui.ControlImage(0, 0, 1280, 720, "", aspectRatio=2)
+        self.addControl(self.image)
+        self.addControl(xbmcgui.ControlImage(0, 672, 1280, 48, backdrop, colorDiffuse="B0000000"))
+        self.info = xbmcgui.ControlLabel(20, 680, 1240, 32, "", font="font12",
+                                         textColor="0xFFFFFFFF", alignment=self.CENTER)
+        self.addControl(self.info)
+        self.show_current()
+
+    def show_current(self):
+        it = self.items[self.index]
+        cid, mid = it["chat_id"], it["msg_id"]
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(it["date"]))
+        text = (it.get("text") or "").strip().splitlines()
+        parts = ["%d / %d%s" % (self.index + 1, len(self.items), "+" if self.next_cursor else "")]
+        if it.get("chat_title"):
+            parts.append(it["chat_title"])
+        parts.append(when)
+        if it["kind"] == "video":
+            parts.append("[B]VIDEO - press OK to play[/B]")
+            url = media_url("thumb", cid, mid)
+        else:
+            url = media_url("photo", cid, mid)
+        if text:
+            parts.append(text[0][:80])
+        self.image.setImage(url, False)
+        self.info.setLabel("   |   ".join(parts))
+        self.prefetch()
+
+    def prefetch(self):
+        """Ask the local server to download the neighbours now, so they're instant."""
+        urls = []
+        for j in (self.index + 1, self.index + 2, self.index - 1):
+            if 0 <= j < len(self.items):
+                it = self.items[j]
+                urls.append(media_url("photo" if it["kind"] == "photo" else "thumb", it["chat_id"], it["msg_id"]))
+
+        def run():
+            for u in urls:
+                try:
+                    with urlopen(u, timeout=120) as r:
+                        r.read()
+                except Exception:
+                    pass
+        threading.Thread(target=run, daemon=True).start()
+
+    def move(self, step):
+        j = self.index + step
+        if j >= len(self.items) and self.next_cursor:
+            self.info.setLabel("Loading more...")
+            q = dict(self.query, cursor=self.next_cursor)
+            try:
+                res = api("media?" + urlencode(q))
+                self.items.extend(res["items"])
+                self.next_cursor = res.get("next")
+            except (ApiError, ServiceDown) as e:
+                notify("Couldn't load more: %s" % e)
+                self.next_cursor = None
+        if 0 <= j < len(self.items):
+            self.index = j
+        self.show_current()
+
+    def onAction(self, action):
+        a = action.getId()
+        if a in (self.RIGHT, self.NEXT_ITEM, self.DOWN, self.MOUSE_CLICK):
+            self.move(1)
+        elif a in (self.LEFT, self.PREV_ITEM, self.UP):
+            self.move(-1)
+        elif a == self.SELECT:
+            it = self.items[self.index]
+            if it["kind"] == "video":
+                self.play_item = it
+                self.close()
+            else:
+                self.move(1)
+        elif a in self.BACK:
+            self.close()
+
+
+def _backdrop():
+    from tgkodi import qrimage
+    folder = os.path.join(common.profile_dir(), "qr")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "backdrop.png")
+    if not os.path.exists(path):
+        qrimage.write_solid(path)
+    return path
+
+
+def viewer(p):
+    q = {"chats": p.get("chats", "all"), "kind": p.get("kind", "all"),
+         "n": common.setting_int("page_size", 50, 10, 200)}
+    if p.get("cursor"):
+        q["cursor"] = p["cursor"]
+    if p.get("unread") == "1":
+        q["unread"] = "1"
+    res = api("media?" + urlencode(q))
+    items = res["items"]
+    if not items:
+        notify("Nothing to show")
+        return
+    start = p.get("start", "")
+    if start.startswith("http"):  # links from 1.3.0: .../photo/<cid>/<mid>/image.jpg
+        bits = start.split("/photo/", 1)[-1].split("/")
+        start = "%s_%s" % (bits[0], bits[1]) if len(bits) >= 2 else ""
+    index = 0
+    for i, it in enumerate(items):
+        if "%d_%d" % (it["chat_id"], it["msg_id"]) == start:
+            index = i
+            break
+    q.pop("cursor", None)
+    win = PhotoViewer(items, index, res.get("next"), q)
+    win.doModal()
+    it = win.play_item
+    del win
+    if it:
+        play_video(it)
+
+
+def play_video(it):
+    url = media_url("stream", it["chat_id"], it["msg_id"], it.get("ext") or ".mp4")
+    li = xbmcgui.ListItem((it.get("text") or "").strip().split("\n")[0][:90] or "Video", path=url)
+    li.setMimeType(it.get("mime") or "video/mp4")
+    li.setContentLookup(False)
+    xbmc.Player().play(url, li)
 
 
 def logout():
@@ -502,8 +635,8 @@ def router():
                   PARAMS.get("title", ""), PARAMS.get("unread") == "1")
         elif mode == "show_image":
             xbmc.executebuiltin("ShowPicture(%s)" % PARAMS["url"])
-        elif mode == "slideshow":
-            slideshow(PARAMS)
+        elif mode in ("viewer", "slideshow"):  # slideshow = links from 1.3.0
+            viewer(PARAMS)
         elif mode == "login":
             login()
         elif mode == "login_qr":

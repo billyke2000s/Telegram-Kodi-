@@ -24,7 +24,9 @@ Installing via the repository means Kodi picks up new versions automatically.
 ## Notes
 - Built with Telethon 1.45.0 (bundled). Fast decryption via bundled `cryptg` for Windows x64, Python 3.11–3.14.
 - Elsewhere (Android/ARM boxes, Linux) `tgkodi/fastcrypto.py` finds the OpenSSL libcrypto Kodi already has loaded and uses it for AES-IGE after a self-test; if none is found it falls back to pure Python (slow). The main menu's *crypto* line shows which is in use.
-- Tapping a photo opens Kodi's slideshow over the current page, so left/right moves between photos (one page at a time).
+- Tapping a photo (from Video add-ons) opens the add-on's own full-screen viewer: left/right = previous/next, it continues onto the next page, OK on a video plays it, Back closes. Neighbouring photos are pre-downloaded.
+- Video streams restart a stalled Telegram download from the byte they stopped at (15 s without data, up to 3 times); FloodWaits longer than 20 s are reported instead of silently waited out.
+- If OpenSSL's AES_ige_encrypt isn't available, fastcrypto falls back to OpenSSL single-block AES or EVP with IGE chaining in Python (~20x pure Python in testing).
 - Videos stream through a local server on 127.0.0.1 (default port 8765) with seeking support.
 - Your login is stored in the add-on profile folder as `session.txt` — keep it private.
 - QR login (1.1.0) uses the bundled pure-Python `qrcode` library to draw the code. Tested against a simulated Telegram and stubbed Kodi modules only.

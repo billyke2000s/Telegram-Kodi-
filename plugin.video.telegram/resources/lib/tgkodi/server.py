@@ -27,6 +27,7 @@ from telethon.sessions import StringSession
 from .mediaindex import MediaIndex, decode_cursor
 
 CHUNK = 512 * 1024  # Telegram's max upload.getFile request size
+STALL_SECONDS = 15  # no data from Telegram for this long -> restart that part of the download
 SESSION_FILE = "session.txt"
 
 FILTERS = {
@@ -62,7 +63,7 @@ def parse_range(header, size):
     return start, end, True
 
 
-def pick_thumb_type(sizes, max_w=640):
+def pick_thumb_type(sizes, max_w=320):
     """Choose a reasonable JPEG thumbnail size type ('m', 'x', ...)."""
     cands = []
     for s in sizes or []:
@@ -150,6 +151,7 @@ class Engine(object):
         self._client_lock = None
         self._dialog_lock = None
         self._img_sem = None
+        self._inflight = {}
         self.cache_dir = os.path.join(profile, "cache")
         for sub in ("thumbs", "photos", "avatars"):
             os.makedirs(os.path.join(self.cache_dir, sub), exist_ok=True)
@@ -289,7 +291,7 @@ class Engine(object):
                 self.client = TelegramClient(
                     StringSession(self._load_session()), int(api_id), api_hash,
                     device_model="Kodi", system_version="Kodi add-on", app_version="1.0.0",
-                    receive_updates=False, flood_sleep_threshold=120, request_retries=5,
+                    receive_updates=False, flood_sleep_threshold=20, request_retries=5,
                     connection_retries=5, retry_delay=2)
             try:
                 await self.client.connect()
@@ -576,8 +578,11 @@ class Engine(object):
 
     def status(self):
         from telethon.crypto import aes, libssl
+        from . import fastcrypto
         if aes.cryptg:
             crypto = "cryptg (fast)"
+        elif fastcrypto.ACTIVE:
+            crypto = fastcrypto.ACTIVE
         elif libssl.decrypt_ige:
             crypto = "libssl (fast)"
         else:
@@ -606,6 +611,26 @@ class Engine(object):
         if os.path.exists(path):
             with open(path, "rb") as f:
                 return f.read()
+        key = (sub, name)
+        pending = self._inflight.get(key)
+        if pending is not None:  # someone is already downloading this exact file
+            return await asyncio.shield(pending)
+        fut = self.loop.create_future()
+        self._inflight[key] = fut
+        try:
+            data = await self._cached_fetch(path, producer)
+        except BaseException as e:
+            if not fut.done():
+                fut.set_exception(e if isinstance(e, Exception) else _HttpError(503, "cancelled"))
+                fut.exception()  # mark retrieved
+            raise
+        else:
+            fut.set_result(data)
+            return data
+        finally:
+            self._inflight.pop(key, None)
+
+    async def _cached_fetch(self, path, producer):
         async with self._img_sem:
             data = await producer()
         if not data:
@@ -834,18 +859,44 @@ class Engine(object):
                 "Content-Length": end - start + 1}
         if partial:
             hdrs["Content-Range"] = "bytes %d-%d/%d" % (start, end, size)
-        self._write_head(writer, 206 if partial else 200, hdrs)
         if method == "HEAD":
+            self._write_head(writer, 206 if partial else 200, hdrs)
             await writer.drain()
             return
         parallel = max(1, min(8, self.cfg.get("parallel", 4)))
-        gen = self._iter_range(m, doc, start, end, parallel)
-        try:
-            async for piece in gen:
-                writer.write(piece)
-                await writer.drain()  # raises when Kodi seeks/stops -> download tasks cancelled
-        finally:
-            await gen.aclose()
+        pos = start           # next byte Kodi still needs
+        restarts = 0
+        sent_head = False
+        while pos <= end:
+            gen = self._iter_range(m, doc, pos, end, parallel)
+            try:
+                while pos <= end:
+                    try:
+                        # A Telegram connection can stall without erroring; don't let Kodi
+                        # sit on a dead stream until it gives up - restart from `pos`.
+                        piece = await asyncio.wait_for(gen.__anext__(), STALL_SECONDS)
+                    except StopAsyncIteration:
+                        pos = end + 1
+                        break
+                    if not sent_head:
+                        self._write_head(writer, 206 if partial else 200, hdrs)
+                        sent_head = True
+                    writer.write(piece)
+                    pos += len(piece)
+                    restarts = 0
+                    await writer.drain()  # raises when Kodi seeks/stops -> downloads cancelled
+            except (asyncio.TimeoutError, errors.TimedOutError, ConnectionResetError, OSError) as e:
+                if isinstance(e, ConnectionError) and sent_head:
+                    raise  # Kodi went away (seek/stop): nothing to do
+                restarts += 1
+                self._log("stream %d/%d stalled at %d (%r), restart %d" % (cid, mid, pos, e, restarts))
+                if restarts > 3:
+                    raise _HttpError(504, "Telegram download stalled") if not sent_head else e
+                self.msg_cache.pop((cid, mid), None)
+                m = await self.message(cid, mid)  # fresh file reference
+                doc = m.media.document
+            finally:
+                await gen.aclose()
 
     async def _iter_range(self, m, doc, start, end, parallel):
         """Yield the bytes [start, end] of a document, downloading `parallel`
