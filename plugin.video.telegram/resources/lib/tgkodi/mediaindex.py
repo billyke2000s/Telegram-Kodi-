@@ -83,8 +83,15 @@ class MediaIndex(object):
                 buf.exhausted = exhausted or not progressed
         return buf
 
-    async def page(self, chat_ids, kind, cursor=None, n=50):
-        """Return (items, next_cursor_text_or_None)."""
+    async def page(self, chat_ids, kind, cursor=None, n=50, latest=None, batch=8):
+        """Return (items, next_cursor_text_or_None).
+
+        latest: optional {chat_id: unix time of the chat's newest message}. A chat can't
+        hold media newer than that, so chats are visited newest-activity first and the
+        walk stops once no remaining chat could beat the n-th item already collected.
+        The result is identical to visiting every chat, just far fewer requests when
+        there are many chats. Chats without a known time are always visited.
+        """
         now = time.time()
         if cursor is None:
             # Fresh browse from the top: drop stale buffers so new posts show up.
@@ -92,14 +99,27 @@ class MediaIndex(object):
                 b = self._bufs.get((cid, kind))
                 if b is not None and now - b.created > self.ttl:
                     del self._bufs[(cid, kind)]
-        bufs = await asyncio.gather(*[self._fill(cid, kind, cursor, n) for cid in chat_ids])
+        latest = latest or {}
+        inf = float("inf")
+        order = sorted(chat_ids, key=lambda c: latest.get(c, inf), reverse=True)
         pool = []
         more = False
-        for buf in bufs:
-            older = [it for it in buf.items if cursor is None or item_key(it) < cursor]
-            pool.extend(older)
-            if not buf.exhausted:
-                more = True
+        i = 0
+        while i < len(order):
+            if len(pool) >= n:
+                pool.sort(key=item_key, reverse=True)
+                nth_date = pool[n - 1]["date"]
+                # Remaining chats are sorted, so if the next can't beat the n-th item none can.
+                if latest.get(order[i], inf) < nth_date:
+                    more = True  # skipped chats may still have older items for later pages
+                    break
+            chunk = order[i:i + batch]
+            i += batch
+            bufs = await asyncio.gather(*[self._fill(cid, kind, cursor, n) for cid in chunk])
+            for buf in bufs:
+                pool.extend(it for it in buf.items if cursor is None or item_key(it) < cursor)
+                if not buf.exhausted:
+                    more = True
         pool.sort(key=item_key, reverse=True)
         page = pool[:n]
         if len(pool) > n:

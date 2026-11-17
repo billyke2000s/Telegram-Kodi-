@@ -1,6 +1,6 @@
 # Telegram Kodi
 
-Kodi add-on (`plugin.video.telegram`) that logs in with your own Telegram account and lists every channel, group and private chat individually, plus combined **All Images**, **All Videos** and **All Mixed** sections across all of them.
+Kodi add-on (`plugin.video.telegram`) that logs in with your own Telegram account and lists every channel, group and private chat individually, plus combined **All Images**, **All Videos** and **All Mixed** sections across all of them (newest first), and an **Unread** section: chats with unread messages and only the photos/videos posted since you last read them.
 
 ## Install (Kodi repository URL)
 If the repository won't connect, choose `plugin.video.telegram-<version>.zip` from the same source in step 3 to install the add-on directly.

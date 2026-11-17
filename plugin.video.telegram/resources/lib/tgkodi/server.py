@@ -351,6 +351,9 @@ class Engine(object):
                     "title": title,
                     "type": typ,
                     "unread": d.unread_count or 0,
+                    # newest message time (upper bound for media dates) and last-read id
+                    "date": int(d.date.timestamp()) if d.date else 0,
+                    "read_max": getattr(d.dialog, "read_inbox_max_id", 0) or 0,
                     "has_photo": bool(photo) and not isinstance(
                         photo, (types.ChatPhotoEmpty, types.UserProfilePhotoEmpty)),
                     "archived": bool(d.archived),
@@ -400,10 +403,20 @@ class Engine(object):
         self._remember(chat_id, m)
         return m
 
+    def _read_max(self, chat_id):
+        for d in self.dialog_list:
+            if d["id"] == chat_id:
+                return d.get("read_max", 0)
+        return 0
+
     async def _fetch_media(self, chat_id, kind, offset_id, limit):
+        # kind "photo:unread" etc. = only messages after the chat's last-read message
+        kind, _, mode = kind.partition(":")
+        min_id = self._read_max(chat_id) if mode == "unread" else 0
         client = await self._authed_client()
         ent = await self.entity(chat_id)
-        msgs = await client.get_messages(ent, limit=limit, offset_id=offset_id, filter=FILTERS[kind])
+        msgs = await client.get_messages(ent, limit=limit, offset_id=offset_id, min_id=min_id,
+                                         filter=FILTERS[kind])
         title = self._title(chat_id)
         items = []
         for m in msgs:
@@ -414,19 +427,21 @@ class Engine(object):
         next_off = min((m.id for m in msgs), default=0)
         return items, next_off, len(msgs) < limit
 
-    async def media_page(self, chats, kind, cursor, n):
+    async def media_page(self, chats, kind, cursor, n, unread=False):
         if kind not in FILTERS:
             raise _HttpError(400, "bad kind")
         dl = await self.dialogs()
         if chats == "all":
             wanted = self._wanted_types()
-            ids = [d["id"] for d in dl if d["type"] in wanted]
+            ids = [d["id"] for d in dl if d["type"] in wanted and (d["unread"] or not unread)]
         else:
             try:
                 ids = [int(x) for x in chats.split(",") if x]
             except ValueError:
                 raise _HttpError(400, "bad chats")
-        items, nxt = await self.index.page(ids, kind, decode_cursor(cursor), n)
+        latest = {d["id"]: d["date"] for d in dl if d.get("date")}
+        index_kind = kind + (":unread" if unread else "")
+        items, nxt = await self.index.page(ids, index_kind, decode_cursor(cursor), n, latest=latest)
         return {"items": items, "next": nxt}
 
     # ---------- login
@@ -742,7 +757,8 @@ class Engine(object):
             res = {"dialogs": await self.dialogs(refresh=q.get("refresh") == "1")}
         elif name == "media":
             n = max(10, min(200, int(q.get("n", self.cfg.get("page_size", 50)))))
-            res = await self.media_page(q.get("chats", "all"), q.get("kind", "all"), q.get("cursor"), n)
+            res = await self.media_page(q.get("chats", "all"), q.get("kind", "all"), q.get("cursor"), n,
+                                        unread=q.get("unread") == "1")
         elif name == "refresh":
             self.dialogs_at = 0
             self.index.clear()

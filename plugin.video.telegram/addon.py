@@ -146,6 +146,10 @@ def root():
     inc = {"channel": common.setting_bool("include_channels"),
            "group": common.setting_bool("include_groups"),
            "user": common.setting_bool("include_private")}
+    unread = [d for d in dialogs if d.get("unread") and inc.get(d["type"])]
+    add_dir("[B]Unread (%d chats)[/B]" % len(unread), url_for(mode="unread"),
+            plot="Chats with unread messages, most recent first, plus their new photos and videos.",
+            context=refresh_ctx())
     groups = [d for d in dialogs if d["type"] == "group"]
     users = [d for d in dialogs if d["type"] == "user"]
     if inc["group"] and groups:
@@ -170,7 +174,8 @@ def add_chat(d):
     label = d["title"]
     if d.get("unread"):
         label += "  [COLOR grey](%d unread)[/COLOR]" % d["unread"]
-    add_dir(label, url_for(mode="chat", id=d["id"], title=d["title"]), thumb=thumb, context=refresh_ctx())
+    add_dir(label, url_for(mode="chat", id=d["id"], title=d["title"], unread=d.get("unread") or 0),
+            thumb=thumb, context=refresh_ctx())
 
 
 def chats(typ):
@@ -181,7 +186,30 @@ def chats(typ):
     end()
 
 
-def chat(cid, title):
+def unread_menu():
+    dialogs = api("dialogs")["dialogs"]
+    inc = {"channel": common.setting_bool("include_channels"),
+           "group": common.setting_bool("include_groups"),
+           "user": common.setting_bool("include_private")}
+    for kind, label in (("all", "Mixed"), ("photo", "Images"), ("video", "Videos")):
+        add_dir("[B]All unread %s[/B]" % label,
+                url_for(mode="media", chats="all", kind=kind, unread=1, title="Unread " + label),
+                plot="New %s from every chat with unread messages, newest first." % label.lower(),
+                context=refresh_ctx())
+    for d in dialogs:  # Telegram's own order: most recent activity first
+        if d.get("unread") and inc.get(d["type"]):
+            add_chat(d)
+    end()
+
+
+def chat(cid, title, unread=0):
+    if unread:
+        for kind, label in (("all", "Mixed"), ("photo", "Images"), ("video", "Videos")):
+            add_dir("[B]Unread %s[/B]" % label,
+                    url_for(mode="media", chats=str(cid), kind=kind, unread=1,
+                            title="%s - Unread %s" % (title, label)),
+                    plot="Only photos/videos posted after the last message you read.",
+                    context=refresh_ctx())
     for kind, label in (("all", "Mixed"), ("photo", "Images"), ("video", "Videos")):
         add_dir(label, url_for(mode="media", chats=str(cid), kind=kind, title="%s - %s" % (title, label)),
                 context=refresh_ctx())
@@ -196,17 +224,22 @@ def fmt_dur(sec):
     return "%d:%02d:%02d" % (h, m, s) if h else "%d:%02d" % (m, s)
 
 
-def media(chats_param, kind, cursor, title):
+def media(chats_param, kind, cursor, title, unread=False):
     q = {"chats": chats_param, "kind": kind, "n": common.setting_int("page_size", 50, 10, 200)}
+    if unread:
+        q["unread"] = "1"
     if cursor:
         q["cursor"] = cursor
     res = api("media?" + urlencode(q))
     combined = chats_param == "all"
     for it in res["items"]:
         add_media_item(it, combined)
+    if not res["items"] and not cursor:
+        add_dir("[I]Nothing here%s[/I]" % (" - no unread photos/videos" if unread else ""),
+                url_for(mode="refresh"), folder=False)
     if res.get("next"):
         add_dir("[B]Next page >>[/B]", url_for(mode="media", chats=chats_param, kind=kind,
-                                              cursor=res["next"], title=title))
+                                              cursor=res["next"], title=title, unread=1 if unread else 0))
     end("images" if CT == "image" else "videos")
 
 
@@ -446,9 +479,12 @@ def router():
         elif mode == "chats":
             chats(PARAMS.get("type", "group"))
         elif mode == "chat":
-            chat(int(PARAMS["id"]), PARAMS.get("title", ""))
+            chat(int(PARAMS["id"]), PARAMS.get("title", ""), int(PARAMS.get("unread", 0) or 0))
+        elif mode == "unread":
+            unread_menu()
         elif mode == "media":
-            media(PARAMS.get("chats", "all"), PARAMS.get("kind", "all"), PARAMS.get("cursor"), PARAMS.get("title", ""))
+            media(PARAMS.get("chats", "all"), PARAMS.get("kind", "all"), PARAMS.get("cursor"),
+                  PARAMS.get("title", ""), PARAMS.get("unread") == "1")
         elif mode == "show_image":
             xbmc.executebuiltin("ShowPicture(%s)" % PARAMS["url"])
         elif mode == "login":
@@ -467,14 +503,14 @@ def router():
             xbmc.executebuiltin("Container.Refresh")
     except ServiceDown:
         notify("Background service not running - restart Kodi")
-        if mode in ("chats", "chat", "media"):
+        if mode in ("chats", "chat", "media", "unread"):
             xbmcplugin.endOfDirectory(HANDLE, succeeded=False)
     except ApiError as e:
         if e.status == 401:
             notify("Not logged in")
         else:
             notify("Error: %s" % e.msg)
-        if mode in ("chats", "chat", "media"):
+        if mode in ("chats", "chat", "media", "unread"):
             xbmcplugin.endOfDirectory(HANDLE, succeeded=False)
 
 
