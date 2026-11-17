@@ -26,8 +26,15 @@ from telethon.sessions import StringSession
 
 from .mediaindex import MediaIndex, decode_cursor
 
+# Telethon drops connections to other data centres after 60 s idle; reconnecting costs
+# the next video a handshake. Keep them for 30 minutes instead.
+from telethon.client import telegrambaseclient as _tbc
+_tbc._DISCONNECT_EXPORTED_AFTER = 30 * 60
+
 CHUNK = 512 * 1024  # Telegram's max upload.getFile request size
-STALL_SECONDS = 15  # no data from Telegram for this long -> restart that part of the download
+STALL_SECONDS = 12  # no data from Telegram for this long -> retry that part of the download
+CHUNK_CACHE_MB = 128  # in-memory video chunk cache shared by all requests
+PREFETCH_VIDEOS = 6   # videos per listing page whose first chunks are fetched ahead
 SESSION_FILE = "session.txt"
 
 FILTERS = {
@@ -152,6 +159,12 @@ class Engine(object):
         self._dialog_lock = None
         self._img_sem = None
         self._inflight = {}
+        self._chunks = OrderedDict()   # (doc_id, index) -> bytes, LRU
+        self._chunk_bytes = 0
+        self._chunk_tasks = {}         # (doc_id, index) -> running download task
+        self._chunk_sem = None
+        self._prefetch_sem = None
+        self._prewarmed = False
         self.cache_dir = os.path.join(profile, "cache")
         for sub in ("thumbs", "photos", "avatars"):
             os.makedirs(os.path.join(self.cache_dir, sub), exist_ok=True)
@@ -213,6 +226,8 @@ class Engine(object):
         self._client_lock = asyncio.Lock()
         self._dialog_lock = asyncio.Lock()
         self._img_sem = asyncio.Semaphore(6)
+        self._chunk_sem = asyncio.Semaphore(8)
+        self._prefetch_sem = asyncio.Semaphore(2)
         self.index = MediaIndex(self._fetch_media, ttl_seconds=self.cfg.get("cache_minutes", 10) * 60,
                                 concurrency=4, log=self._log)
         self.server = await asyncio.start_server(self._handle, "127.0.0.1", self.cfg.get("port", 8765),
@@ -271,7 +286,10 @@ class Engine(object):
                 pass
         self.client = None
         self.authorized = False
+        self._prewarmed = False
         self.me = None
+        self._chunks.clear()
+        self._chunk_bytes = 0
         self.entities.clear()
         self.dialog_list = []
         self.dialogs_at = 0
@@ -299,6 +317,7 @@ class Engine(object):
                 if self.authorized:
                     self.me = await self.client.get_me()
                     self._save_session()
+                    self._schedule_prewarm()
                 self.last_error = ""
             except Exception as e:
                 self.last_error = "connect failed: %r" % e
@@ -444,7 +463,30 @@ class Engine(object):
         latest = {d["id"]: d["date"] for d in dl if d.get("date")}
         index_kind = kind + (":unread" if unread else "")
         items, nxt = await self.index.page(ids, index_kind, decode_cursor(cursor), n, latest=latest)
+        for it in [i for i in items if i["kind"] == "video"][:PREFETCH_VIDEOS]:
+            self._prefetch(it["chat_id"], it["msg_id"])
         return {"items": items, "next": nxt}
+
+    def _prefetch(self, cid, mid):
+        """Start fetching the beginning of a video (and its end if the file isn't
+        'streamable', where players read the index from the end) without waiting."""
+        async def run():
+            try:
+                async with self._prefetch_sem:
+                    m = await self.message(cid, mid)
+                    doc = m.media.document
+                    last = max(0, (doc.size - 1) // CHUNK)
+                    idx = [0, 1] if last >= 1 else [0]
+                    streamable = any(getattr(a, "supports_streaming", False) for a in doc.attributes)
+                    if not streamable and last > 1:
+                        idx.append(last)
+                    md = (m.input_chat, m.id) if m.input_chat else None
+                    await asyncio.gather(*[self._get_chunk(doc, md, i) for i in idx])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # best effort only
+        self.loop.create_task(run())
 
     # ---------- login
 
@@ -555,11 +597,36 @@ class Engine(object):
             client.remove_event_handler(on_token)
             client._no_updates = True
 
+    def _schedule_prewarm(self):
+        if not self._prewarmed:
+            self._prewarmed = True
+            self.loop.create_task(self._prewarm_dcs())
+
+    async def _prewarm_dcs(self):
+        """Media often lives on another data centre. The first use of each one needs a
+        key exchange that can take seconds on a TV box; do it now, in the background."""
+        await asyncio.sleep(5)  # let the first menus load first
+        client = self.client
+        if client is None:
+            return
+        home = client.session.dc_id
+        for dc in (1, 2, 3, 4, 5):
+            if dc == home or self.client is not client:
+                continue
+            try:
+                sender = await asyncio.wait_for(client._borrow_exported_sender(dc), 60)
+                await client._return_exported_sender(sender)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._log("prewarm DC %d failed: %r" % (dc, e))
+
     async def _login_done(self):
         self.authorized = await self.client.is_user_authorized()
         if self.authorized:
             self.me = await self.client.get_me()
             self._save_session()
+            self._schedule_prewarm()
         return {"ok": self.authorized}
 
     async def logout(self):
@@ -801,6 +868,9 @@ class Engine(object):
             res = self.login_qr_status()
         elif name == "login/qr/cancel" and method == "POST":
             res = await self.login_qr_cancel()
+        elif name == "prefetch":
+            self._prefetch(int(q.get("chat", 0)), int(q.get("msg", 0)))
+            res = {"ok": True}
         elif name == "logout" and method == "POST":
             res = await self.logout()
         else:
@@ -872,9 +942,7 @@ class Engine(object):
             try:
                 while pos <= end:
                     try:
-                        # A Telegram connection can stall without erroring; don't let Kodi
-                        # sit on a dead stream until it gives up - restart from `pos`.
-                        piece = await asyncio.wait_for(gen.__anext__(), STALL_SECONDS)
+                        piece = await gen.__anext__()  # each chunk has its own stall timeout
                     except StopAsyncIteration:
                         pos = end + 1
                         break
@@ -890,7 +958,7 @@ class Engine(object):
                     raise  # Kodi went away (seek/stop): nothing to do
                 restarts += 1
                 self._log("stream %d/%d stalled at %d (%r), restart %d" % (cid, mid, pos, e, restarts))
-                if restarts > 3:
+                if restarts > 2:
                     raise _HttpError(504, "Telegram download stalled") if not sent_head else e
                 self.msg_cache.pop((cid, mid), None)
                 m = await self.message(cid, mid)  # fresh file reference
@@ -899,29 +967,68 @@ class Engine(object):
                 await gen.aclose()
 
     async def _iter_range(self, m, doc, start, end, parallel):
-        """Yield the bytes [start, end] of a document, downloading `parallel`
-        512 KiB chunks at a time (round-robin strides) to hide request latency."""
-        client = self.client
-        size = doc.size
-        aligned = start - (start % CHUNK)
-        n_total = (end + 1 - aligned + CHUNK - 1) // CHUNK
-        p = max(1, min(parallel, n_total))
-        queues = [asyncio.Queue(maxsize=2) for _ in range(p)]
+        """Yield bytes [start, end] of a document. Works in aligned 512 KiB chunks kept in
+        a shared in-memory cache, downloading up to `parallel` chunks ahead. Kodi opens a
+        video several times while probing (start, end, start again); repeats are served
+        from memory instead of Telegram."""
         msg_data = (m.input_chat, m.id) if m.input_chat else None
+        first, last = start // CHUNK, end // CHUNK
+        window = {}
+        nxt = first
+        if first == 0 and last > 2:  # players often jump to the end next; get it now
+            self.loop.create_task(self._quiet(self._get_chunk(doc, msg_data, (doc.size - 1) // CHUNK)))
+        try:
+            for idx in range(first, last + 1):
+                while nxt <= last and nxt < idx + parallel:
+                    window[nxt] = asyncio.ensure_future(self._get_chunk(doc, msg_data, nxt))
+                    nxt += 1
+                data = await window.pop(idx)
+                lo = start - idx * CHUNK if idx == first else 0
+                hi = end - idx * CHUNK + 1 if idx == last else len(data)
+                piece = data[lo:hi]
+                if piece:
+                    yield piece
+                if len(data) < CHUNK:
+                    break  # end of file
+        finally:
+            for f in window.values():  # only our waits; shared downloads finish into the cache
+                f.cancel()
+            if window:
+                await asyncio.gather(*window.values(), return_exceptions=True)
 
-        async def producer(i):
-            count = (n_total - i + p - 1) // p
-            it = client._iter_download(doc, offset=aligned + i * CHUNK, stride=p * CHUNK,
-                                       chunk_size=CHUNK, request_size=CHUNK, limit=count,
-                                       file_size=size, msg_data=msg_data)
+    @staticmethod
+    async def _quiet(coro):
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    async def _get_chunk(self, doc, msg_data, idx):
+        key = (doc.id, idx)
+        data = self._chunks.get(key)
+        if data is not None:
+            self._chunks.move_to_end(key)
+            return data
+        task = self._chunk_tasks.get(key)
+        if task is None:
+            task = self.loop.create_task(self._download_chunk(doc, msg_data, idx))
+            self._chunk_tasks[key] = task
+            task.add_done_callback(lambda t, k=key: self._chunk_tasks.pop(k, None))
+        return await asyncio.shield(task)
+
+    async def _download_chunk(self, doc, msg_data, idx):
+        client = self.client
+
+        async def once():
+            it = client._iter_download(doc, offset=idx * CHUNK, stride=CHUNK, chunk_size=CHUNK,
+                                       request_size=CHUNK, limit=1, file_size=doc.size,
+                                       msg_data=msg_data)
             try:
                 async for ch in it:
-                    await queues[i].put(bytes(ch))
-                await queues[i].put(None)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                await queues[i].put(e)
+                    return bytes(ch)
+                return b""
             finally:
                 if getattr(it, "_sender", None) is not None:
                     try:
@@ -929,30 +1036,16 @@ class Engine(object):
                     except Exception:
                         pass
 
-        tasks = [asyncio.ensure_future(producer(i)) for i in range(p)]
-        skip = start - aligned
-        remaining = end - start + 1
-        k = 0
-        try:
-            while remaining > 0:
-                piece = await queues[k % p].get()
-                if piece is None:
-                    break
-                if isinstance(piece, Exception):
-                    raise piece
-                if skip:
-                    piece = piece[skip:]
-                    skip = 0
-                if len(piece) > remaining:
-                    piece = piece[:remaining]
-                remaining -= len(piece)
-                k += 1
-                if piece:
-                    yield piece
-        finally:
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        async with self._chunk_sem:
+            # A Telegram connection can stall without erroring; give up on this attempt
+            # so the stream can retry instead of leaving Kodi on a dead connection.
+            data = await asyncio.wait_for(once(), STALL_SECONDS)
+        self._chunks[(doc.id, idx)] = data
+        self._chunk_bytes += len(data)
+        while self._chunk_bytes > CHUNK_CACHE_MB * 1024 * 1024 and self._chunks:
+            _, old = self._chunks.popitem(last=False)
+            self._chunk_bytes -= len(old)
+        return data
 
 
 class KodiLogHandler(logging.Handler):

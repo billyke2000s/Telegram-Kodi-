@@ -84,3 +84,11 @@ msgstr ""
 msgctxt "#30045"
 msgid "Image/thumbnail disk cache limit (MB)"
 msgstr ""
+
+msgctxt "#30029"
+msgid "Show photos and videos as a thumbnail wall"
+msgstr ""
+
+msgctxt "#30030"
+msgid "Uses the skin's Wall view (Estuary). Turn off if your skin shows something odd."
+msgstr ""

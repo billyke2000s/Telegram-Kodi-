@@ -26,6 +26,8 @@ Installing via the repository means Kodi picks up new versions automatically.
 - Elsewhere (Android/ARM boxes, Linux) `tgkodi/fastcrypto.py` finds the OpenSSL libcrypto Kodi already has loaded and uses it for AES-IGE after a self-test; if none is found it falls back to pure Python (slow). The main menu's *crypto* line shows which is in use.
 - Tapping a photo (from Video add-ons) opens the add-on's own full-screen viewer: left/right = previous/next, it continues onto the next page, OK on a video plays it, Back closes. Neighbouring photos are pre-downloaded.
 - Video streams restart a stalled Telegram download from the byte they stopped at (15 s without data, up to 3 times); FloodWaits longer than 20 s are reported instead of silently waited out.
+- Video data is fetched in aligned 512 KiB chunks kept in a shared 128 MB in-memory LRU cache, up to `parallel` chunks ahead. Kodi's probing (start, end, start again) reuses cached chunks; the end of the file is fetched as soon as playback starts. Each listing page pre-loads the first 1 MB of up to 6 videos (plus the end for non-streamable files); the viewer pre-loads the video it shows.
+- Connections to Telegram's other data centres are opened in the background after login and kept for 30 minutes (Telethon default: 60 s).
 - If OpenSSL's AES_ige_encrypt isn't available, fastcrypto falls back to OpenSSL single-block AES or EVP with IGE chaining in Python (~20x pure Python in testing).
 - Videos stream through a local server on 127.0.0.1 (default port 8765) with seeking support.
 - Your login is stored in the add-on profile folder as `session.txt` — keep it private.

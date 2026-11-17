@@ -235,16 +235,21 @@ def media(chats_param, kind, cursor, title, unread=False):
     combined = chats_param == "all"
     # Same page re-listed as pictures, so a tapped photo can open a slideshow (left/right)
     listing = {"chats": chats_param, "kind": kind, "cursor": cursor or "", "title": title,
-               "unread": 1 if unread else 0}
+               "unread": 1 if unread else 0}  # page number isn't needed by the viewer
     for it in res["items"]:
         add_media_item(it, combined, listing)
     if not res["items"] and not cursor:
         add_dir("[I]Nothing here%s[/I]" % (" - no unread photos/videos" if unread else ""),
                 url_for(mode="refresh"), folder=False)
+    page = int(PARAMS.get("page", "1") or 1)
     if res.get("next"):
-        add_dir("[B]Next page >>[/B]", url_for(mode="media", chats=chats_param, kind=kind,
-                                              cursor=res["next"], title=title, unread=1 if unread else 0))
+        add_dir("[B]Next page (%d) >>[/B]" % (page + 1),
+                url_for(mode="media", chats=chats_param, kind=kind, cursor=res["next"], title=title,
+                        unread=1 if unread else 0, page=page + 1),
+                thumb=ICON, plot="Older items")
     end("images" if CT == "image" else "videos")
+    if common.setting_bool("wall_view", True):
+        xbmc.executebuiltin("Container.SetViewMode(500)")  # Estuary "Wall"; ignored if absent
 
 
 def add_media_item(it, combined, listing=None):
@@ -474,6 +479,9 @@ class PhotoViewer(xbmcgui.WindowDialog):
         self.play_item = None
         backdrop = _backdrop()
         self.addControl(xbmcgui.ControlImage(0, 0, 1280, 720, backdrop))
+        # sits behind the picture, so it's only visible until the picture has loaded
+        self.addControl(xbmcgui.ControlLabel(0, 340, 1280, 40, "Loading...", font="font13",
+                                             textColor="0xFF888888", alignment=self.CENTER))
         self.image = xbmcgui.ControlImage(0, 0, 1280, 720, "", aspectRatio=2)
         self.addControl(self.image)
         self.addControl(xbmcgui.ControlImage(0, 672, 1280, 48, backdrop, colorDiffuse="B0000000"))
@@ -494,6 +502,7 @@ class PhotoViewer(xbmcgui.WindowDialog):
         if it["kind"] == "video":
             parts.append("[B]VIDEO - press OK to play[/B]")
             url = media_url("thumb", cid, mid)
+            _prefetch_video(cid, mid)
         else:
             url = media_url("photo", cid, mid)
         if text:
@@ -552,6 +561,16 @@ class PhotoViewer(xbmcgui.WindowDialog):
             self.close()
 
 
+def _prefetch_video(cid, mid):
+    """Tell the service to start downloading the video's beginning in the background."""
+    def run():
+        try:
+            api("prefetch?" + urlencode({"chat": cid, "msg": mid}), timeout=10)
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _backdrop():
     from tgkodi import qrimage
     folder = os.path.join(common.profile_dir(), "qr")
@@ -584,12 +603,25 @@ def viewer(p):
             index = i
             break
     q.pop("cursor", None)
-    win = PhotoViewer(items, index, res.get("next"), q)
-    win.doModal()
-    it = win.play_item
-    del win
-    if it:
+    next_cursor = res.get("next")
+    monitor = xbmc.Monitor()
+    while True:
+        win = PhotoViewer(items, index, next_cursor, q)
+        win.doModal()
+        it, index, next_cursor = win.play_item, win.index, win.next_cursor
+        del win
+        if not it:
+            return
+        # Play, then return to the viewer at the same place when the video ends/stops.
+        player = xbmc.Player()
         play_video(it)
+        for _ in range(60):  # wait up to 30 s for playback to start
+            if player.isPlaying() or monitor.waitForAbort(0.5):
+                break
+        while player.isPlaying() and not monitor.waitForAbort(0.5):
+            pass
+        if monitor.abortRequested():
+            return
 
 
 def play_video(it):

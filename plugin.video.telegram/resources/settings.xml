@@ -46,6 +46,11 @@
                     <default>10</default>
                     <control type="edit" format="integer"><heading>30027</heading></control>
                 </setting>
+                <setting id="wall_view" type="boolean" label="30029" help="30030">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
             </group>
         </category>
         <category id="advanced" label="30040" help="">
