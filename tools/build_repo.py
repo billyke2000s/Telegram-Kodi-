@@ -58,6 +58,7 @@ def main():
 
     xml_parts = []
     repo_zip_name = None
+    direct_links = []
     for addon_id_dir in ADDONS:
         addon_dir = os.path.join(ROOT, addon_id_dir)
         addon_id, version = addon_info(addon_dir)
@@ -72,6 +73,11 @@ def main():
         if addon_id.startswith("repository."):
             repo_zip_name = os.path.basename(zip_path)
             shutil.copy2(zip_path, os.path.join(OUT, repo_zip_name))
+        else:
+            # Also offer each add-on directly, so it can be installed from zip
+            # even if the repository route fails on a given Kodi box.
+            direct_links.append(os.path.basename(zip_path))
+            shutil.copy2(zip_path, os.path.join(OUT, direct_links[-1]))
 
     addons_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<addons>\n'
                   + "\n\n".join(xml_parts) + "\n</addons>\n")
@@ -82,9 +88,10 @@ def main():
 
     # Kodi's File Manager reads plain <a href> links from an HTML page.
     with open(os.path.join(OUT, "index.html"), "w", encoding="utf-8") as f:
+        links = [repo_zip_name] + direct_links
         f.write("<!DOCTYPE html>\n<html><body>\n"
-                f'<a href="{repo_zip_name}">{repo_zip_name}</a>\n'
-                "</body></html>\n")
+                + "".join(f'<a href="{n}">{n}</a><br>\n' for n in links)
+                + "</body></html>\n")
     # Stop GitHub Pages running Jekyll over the files.
     open(os.path.join(OUT, ".nojekyll"), "w").close()
     print("done:", os.path.relpath(OUT, ROOT))
